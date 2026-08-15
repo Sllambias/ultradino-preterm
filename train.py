@@ -5,23 +5,21 @@ Created on Wed Mar  4 09:41:00 2026
 
 @author: jacob
 """
-#%%Imports
-import argparse
 
+import argparse
+import torch
+import warnings
+from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
-import torch
 from tqdm import tqdm
-
-from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
-from utils.model_utils import model_from_conf, update_freezing, log_ehr_encoding_coverage
-from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
-from utils.loss_utils import get_loss, fix_labels
+from utils.loss_utils import fix_labels, get_loss
 from utils.metrics import Metrics
-from utils.utils import setup
+from utils.model_utils import model_from_conf, update_freezing
+from utils.optim_loader import get_cosine_schedule_with_warmup, get_optimizer
 from utils.test_utils import test_model
+from utils.utils import setup
 
-import warnings
 warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
@@ -31,31 +29,31 @@ def main(config_path):
 
     save_path = setup(cfg)
 
-    train_df, val_df = make_data_split(cfg, cfg.data.path, unique_column='CPR_MOTHER')
+    train_df, val_df = make_data_split(cfg, cfg.data.path, unique_column="CPR_MOR")
     TrainData = PreTermDataset(train_df, cfg, train=True)
     ValData = PreTermDataset(val_df, cfg, train=False)
 
-    TrainLoader = DataLoader(TrainData,
-                             cfg.data.batch_size,
-                             shuffle=True,
-                             pin_memory=True,
-                             drop_last=True,
-                             num_workers=cfg.data.workers,
-                             collate_fn=collate_fn)
+    TrainLoader = DataLoader(
+        TrainData,
+        cfg.data.batch_size,
+        shuffle=True,
+        pin_memory=True,
+        drop_last=True,
+        num_workers=cfg.data.workers,
+        collate_fn=collate_fn,
+    )
 
-    ValLoader = DataLoader(ValData,
-                           cfg.data.batch_size,
-                           shuffle=False,
-                           pin_memory=False,
-                           drop_last=False,
-                           num_workers=cfg.data.workers,
-                           collate_fn=collate_fn)
+    ValLoader = DataLoader(
+        ValData,
+        cfg.data.batch_size,
+        shuffle=False,
+        pin_memory=False,
+        drop_last=False,
+        num_workers=cfg.data.workers,
+        collate_fn=collate_fn,
+    )
 
-    TrainData.population_count(cfg.tasks.preterm.cutoffs)
-    ValData.population_count(cfg.tasks.preterm.cutoffs)
-
-    model = model_from_conf(cfg)
-    log_ehr_encoding_coverage(model, [train_df, val_df], ["train", "val"])
+    model = model_from_conf(cfg, TrainData.ehr_df.shape[1] + TrainData.img_metadata_df.shape[1])
 
     optimizer = get_optimizer(model, cfg)
     scheduler = get_cosine_schedule_with_warmup(optimizer, cfg)
@@ -67,28 +65,25 @@ def main(config_path):
 
         model.train()
         train_loss = 0.0
-        for data in tqdm(TrainLoader):
+        for data in tqdm(TrainLoader, desc=f"Train epoch: {epoch} / {cfg.training.epochs}"):
             optimizer.zero_grad()
-            outputs, _ = model(data['imgs'].to(cfg.device.type),
-                               data['img_data'].to(cfg.device.type),
-                               data['ehr_data'].to(cfg.device.type),
-                               patient_ids=data['IDs'])
+            outputs, _ = model(
+                data["imgs"].to(cfg.device.type),
+                data["tabular_data"].to(cfg.device.type),
+                data["aux_vars"].to(cfg.device.type),
+            )
             loss = 0
             for task in cfg.tasks.keys():
-                if task == 'preterm':
-                    cutoffs, loss_fn, weights = cfg.tasks[task].values()
-                    for cutoff, weight in zip(cutoffs, weights):
-                        labels, mask = fix_labels(data, cutoff, cfg.data.label_smoothing_param)
-                        mask = mask.to(cfg.device.type)
-                        labels = labels.to(cfg.device.type)
-                        preterm_loss = loss_fns[loss_fn](outputs[task][str(cutoff)]['logits'], labels)*weight
-                        loss += (preterm_loss*mask).sum() / mask.sum().clamp(min=1)
+                if task == "preterm":
+                    cutoff, loss_fn, weight = cfg.tasks[task].values()
+                    labels = fix_labels(data["labels"], cutoff, cfg.data.label_smoothing_param)
+                    labels = labels.to(cfg.device.type)
+                    loss += loss_fns[loss_fn](outputs[task][str(cutoff)]["logits"], labels) * weight
                 else:
-                    for aux_task in cfg.tasks[task]:
+                    for idx, aux_task in enumerate(cfg.tasks[task]):
                         var, loss_fn, weight = aux_task.values()
-                        labels = data['aux_vars'][var].to(cfg.device.type)
-                        loss += loss_fns[loss_fn](outputs[task][var]['logits'], labels)*weight
-
+                        labels = data["aux_vars"][:, idx].to(cfg.device.type)
+                        loss += loss_fns[loss_fn](outputs[task][var]["logits"], labels.unsqueeze(1)) * weight
             loss.backward()
 
             train_loss += loss.item() / len(TrainLoader)
@@ -100,44 +95,40 @@ def main(config_path):
         val_loss = 0
 
         with torch.no_grad():
-            for data in ValLoader:
-                outputs, _ = model(data['imgs'].to(cfg.device.type),
-                                   data['img_data'].to(cfg.device.type),
-                                   data['ehr_data'].to(cfg.device.type),
-                                   patient_ids=data['IDs'])
-                metrics.update(outputs, data)
+            for data in tqdm(ValLoader, desc=f"Val epoch: {epoch} / {cfg.training.epochs}"):
+                outputs, _ = model(
+                    data["imgs"].to(cfg.device.type),
+                    data["tabular_data"].to(cfg.device.type),
+                    data["aux_vars"].to(cfg.device.type),
+                )
+                metrics.update(outputs, data["labels"], data["ID"])
 
                 loss = 0
 
                 for task in cfg.tasks.keys():
-                    if task == 'preterm':
-                        cutoffs, loss_fn, weights = cfg.tasks[task].values()
-                        for cutoff, weight in zip(cutoffs, weights):
-                            labels, mask = fix_labels(data, cutoff, cfg.data.label_smoothing_param)
-                            mask = mask.to(cfg.device.type)
-                            labels = labels.to(cfg.device.type)
-                            preterm_loss = loss_fns[loss_fn](outputs[task][str(cutoff)]['logits'], labels)*weight
-                            loss += (preterm_loss*mask).sum() / mask.sum().clamp(min=1)
-
+                    if task == "preterm":
+                        cutoff, loss_fn, weight = cfg.tasks[task].values()
+                        labels = fix_labels(data["labels"], cutoff, cfg.data.label_smoothing_param)
+                        labels = labels.to(cfg.device.type)
+                        loss += loss_fns[loss_fn](outputs[task][str(cutoff)]["logits"], labels) * weight
                     else:
-                        for aux_task in cfg.tasks[task]:
+                        for idx, aux_task in enumerate(cfg.tasks[task]):
                             var, loss_fn, weight = aux_task.values()
-                            labels = data['aux_vars'][var].to(cfg.device.type)
-                            loss += loss_fns[loss_fn](outputs[task][var]['logits'], labels)*weight
-
+                            labels = data["aux_vars"][:, idx].to(cfg.device.type)
+                            loss += loss_fns[loss_fn](outputs[task][var]["logits"], labels.unsqueeze(1)) * weight
                 val_loss += loss.item() / len(ValLoader)
 
         metrics.log_metrics(train_loss, val_loss)
-        torch.save(model.state_dict(), save_path + '/weights/' + str(epoch).zfill(3) + '.pth')
+        torch.save(model.state_dict(), save_path + "/weights/" + str(epoch).zfill(3) + ".pth")
 
     test_model(save_path)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train preterm prediction model')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train preterm prediction model")
     parser.add_argument(
-        'config',
-        help='Full path to training config YAML (info.name sets the run folder)',
+        "config",
+        help="Full path to training config YAML (info.name sets the run folder)",
     )
     args = parser.parse_args()
     main(args.config)

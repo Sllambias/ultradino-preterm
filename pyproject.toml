@@ -14,7 +14,19 @@ classifiers = [
 ]
 
 dependencies = [
+    # also ultradino-finetune
+    # and xformers
+    "albumentations>=2.0.8",
+    "numpy>=2.5.2",
+    "omegaconf>=2.3.1",
+    "pillow>=12.3.0",
+    "polars>=1.43.2",
     "torch>=2.13.0",
+    "torchmetrics>=1.9.0",
+    "torchvision>=0.28.0",
+    "tqdm>=4.70.0",
+    "scikit-learn>=1.9.0",
+    "matplotlib>=3.11.1",
 ]
 
 [tool.setuptools.packages.find]

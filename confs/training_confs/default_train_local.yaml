@@ -1,0 +1,94 @@
+output_dir: /Users/zcr545/Desktop/Projects/repos/ultradino-preterm/outputs
+random_seed: 9521
+data:
+  path: /Users/zcr545/Desktop/Projects/repos/EHR_extract/outputs/test_SL_ehr_table/table_test_SL_ehr_table.csv
+  test_path: /Users/zcr545/Desktop/Projects/repos/EHR_extract/outputs/test_SL_ehr_table/table_test_SL_ehr_table.csv
+  batch_size: 128
+  val_frac: 0.05
+  workers: 1
+  label_column: "GA"
+  img_path_column: "NO_OCR_PATH"
+  img_metadata_columns: ['PDX', 'PDY']
+  ehr_noncategorical_columns: ['maternal_age',
+    'maternal_BMI', 'fertility_treatment', 'pcos', 'endometriose', 'sleep_disorder', 'previous_surgical_abortion', 
+    'previous_spontaneous_abortion', 'bacterial_vaginosis', 'chlamydia', 'gonorrhea', 'syphilis', 'trichomoniasis', 
+    'pyelonefritis', 'previous_ptb', 'previous_late_miscarriage', 'previous_pprom', 'previous_short_cervix', 'previous_c_section', 
+    'previous_preclampsia', 'current_cervical_conization', 'current_short_cervix', 'female_fetus', 'current_multiple_pregnancies', 
+    'current_uterine_malformation', 'current_fibroids', 'current_polyhydramnios', 'current_preclampsia', 'current_vaginal_bleeding', 
+    'current_infection', 'current_pprom', 'current_maternal_comorbidity', 'current_c_section', 'current_induced_labor', 'alcohol_consumption', 
+    'current_parity', 'current_cervical_length', 'current_hcg', 'current_papp', 'lab_bmi', 'current_hcg_lab_dat',
+    'current_papp_lab_dat']
+  ehr_categorical_columns: ["ethnicity", "smoking_status"]
+  img_size: [48, 48]
+  oversample_ratio: 1 #0 = No oversampling
+  label_smoothing_param: 2 #0 = No label smoothing
+
+tasks:
+  preterm:
+    cutoff: 238 #Sharp cutoff (GA < GA_cutoff)
+    loss: 'bce'
+    weight: 1.0
+  aux_tasks:
+    - var: GA
+      loss: 'l2'
+      weights: 0.01
+
+
+training:
+  epochs: 3
+  vit_frozen_until: 10  #VIT is frozen until this epoch
+  tabular_embedding_block_frozen_until: 2 #EHR is frozen until this epoch
+  #Unfreezeing strategy. Unfreeze blocks_per_step every_n_epochs until we reach top_n_blocks are unfrozen.
+  #blocks_per_step = -1, top_n_blocks = -1 is all layers immediately
+  #blocks_per_step = -1, top_n_blocks = N is top N layers immediately
+  blocks_per_step: -1 
+  every_n_epochs: 2
+  top_n_blocks: -1
+  
+auxiliary:
+  method: append
+
+model:
+  vit:
+    type: vitb16
+    #weights_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/other_models/weights/vitb16.pth #VitB
+    weights_path: null
+    #weights_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/other_models/weights/oversampled_vitl16.pth 
+    dropout: 0.2
+  
+  #mlp:
+  #  type: mlp
+  #  layer_dims: [16]
+  #  dropout: 0.2
+  #ehr:
+  #  type: patient_lookup
+  #  num_tokens: 3
+     
+  
+  embedding_layer_dims:
+    - 256
+    - 512
+    - 3840 # 768 is the embedding dim of the VIT. 768 will result in 1 token
+    
+
+  head:
+    layer_dims: []
+    dropout: 0.2
+    
+optimizer:
+  type: AdamW
+  lr1: 5e-4 #Used while ViT is frozen
+  lr2: 5e-5 #Used while ViT is unfrozen
+  lr_decay: 0.55
+  weight_decay: 1e-2
+
+  #AdamW
+  adamw_params: [0.9,0.999, 1e-8] #Beta1, Beta2, Epsilon
+  
+scheduler:
+  type: cosine_warmup
+  num_warmup_steps: 10
+  num_cycles: 1 #A multiplier for the cosine scheduler. 2 means two cycles over training
+  
+device:
+  type: cpu
