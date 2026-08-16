@@ -59,7 +59,9 @@ model:
   embedding_layer_dims:
     - 256
     - 512
-    
+    - 512
+    - 512
+    - 1024
     - 3840 # 768 is the embedding dim of the VIT. 768 will result in 1 token
     
   head:
