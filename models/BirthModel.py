@@ -6,7 +6,6 @@ Created on Wed Feb 18 11:46:47 2026
 @author: jacob
 """
 
-import torch
 from torch import nn
 
 

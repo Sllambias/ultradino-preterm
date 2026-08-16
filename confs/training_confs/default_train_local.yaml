@@ -18,7 +18,7 @@ data:
     'current_infection', 'current_pprom', 'current_maternal_comorbidity', 'current_c_section', 'current_induced_labor', 'alcohol_consumption', 
     'current_parity', 'current_cervical_length', 'current_hcg', 'current_papp', 'lab_bmi', 'current_hcg_lab_dat',
     'current_papp_lab_dat']
-  ehr_categorical_columns: ["ethnicity", "smoking_status"]
+  ehr_categorical_columns: []
   img_size: [48, 48]
   oversample_ratio: 1 #0 = No oversampling
   label_smoothing_param: 2 #0 = No label smoothing

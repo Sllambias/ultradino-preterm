@@ -35,13 +35,16 @@ class PreTermDataset(Dataset):
         self.label_df = df.select(pl.col(cfg.data.label_column))
         self.img_df = df.select(pl.col(cfg.data.img_path_column))
         self.img_metadata_df = df.select(pl.col(cfg.data.img_metadata_columns))
-        self.ehr_df = pl.concat(
-            [
-                df.select(pl.col(cfg.data.ehr_noncategorical_columns)),
-                df.select(polars.selectors.starts_with(cfg.data.ehr_categorical_columns)),
-            ],
-            how="horizontal",
-        )
+        if len(cfg.data.ehr_categorical_columns) > 0:
+            self.ehr_df = pl.concat(
+                [
+                    df.select(pl.col(cfg.data.ehr_noncategorical_columns)),
+                    df.select(polars.selectors.starts_with(cfg.data.ehr_categorical_columns)),
+                ],
+                how="horizontal",
+            )
+        else:
+            self.ehr_df = df.select(pl.col(cfg.data.ehr_noncategorical_columns))
 
         self.aux_df = df.select(pl.col([task.var for task in cfg.tasks.aux_tasks]))
         self.setup_transforms()
