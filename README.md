@@ -35,4 +35,4 @@ python EHR_extract/extract.py --config-name preterm_noMP_34_img_v5
 python EHR_extract/table.py --config-name SL_EHR_noMP_img_v5
 
 ### 4.1 Train on NGC
-python train.py confs/training_confs/default_train_local.yaml 
+python train.py confs/training_confs/default_train_NGC.yaml 

@@ -15,10 +15,10 @@ data:
     'pyelonefritis', 'previous_ptb', 'previous_late_miscarriage', 'previous_pprom', 'previous_short_cervix', 'previous_c_section', 
     'previous_preclampsia', 'current_cervical_conization', 'current_short_cervix', 'female_fetus', 'current_multiple_pregnancies', 
     'current_uterine_malformation', 'current_fibroids', 'current_polyhydramnios', 'current_preclampsia', 'current_vaginal_bleeding', 
-    'current_infection', 'current_pprom', 'current_maternal_comorbidity', 'current_c_section', 'current_induced_labor', 'alcohol_consumption', 
+    'current_infection', 'current_pprom', 'current_maternal_comorbidity', 'current_c_section', 'current_induced_labor', 
     'current_parity', 'current_cervical_length', 'current_hcg', 'current_papp', 'lab_bmi', 'current_hcg_lab_dat',
     'current_papp_lab_dat']
-  ehr_categorical_columns: ["ethnicity", "smoking_status"]
+  ehr_categorical_columns: ["alcohol_consumption", "ethnicity", "smoking_status"]
   img_size: [48, 48]
   oversample_ratio: 1 #0 = No oversampling
   label_smoothing_param: 2 #0 = No label smoothing
