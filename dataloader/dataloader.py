@@ -132,9 +132,7 @@ def read_dataframe(path, columns=None):
 
 
 def make_data_split(cfg, data_path, unique_column="CPR_MOTHER", training=True):
-    df = pl.read_csv(
-        data_path,
-    )
+    df = pl.read_csv(data_path, infer_schema_length=10000000)
     df = df.to_dummies(columns=cfg.data.ehr_categorical_columns)
     df = df.with_columns(pl.all().fill_null(-1))
     df = df.with_columns(pl.col(cfg.data.ehr_noncategorical_columns).cast(pl.Float32))
