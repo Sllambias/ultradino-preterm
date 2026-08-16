@@ -37,7 +37,7 @@ tasks:
 training:
   epochs: 60
   vit_frozen_until: 10  #VIT is frozen until this epoch
-  tabular_embedding_block_frozen_until: 2 #EHR is frozen until this epoch
+  tabular_embedding_block_frozen_until: 0 #EHR is frozen until this epoch
   #Unfreezeing strategy. Unfreeze blocks_per_step every_n_epochs until we reach top_n_blocks are unfrozen.
   #blocks_per_step = -1, top_n_blocks = -1 is all layers immediately
   #blocks_per_step = -1, top_n_blocks = N is top N layers immediately
@@ -59,7 +59,7 @@ model:
   embedding_layer_dims:
     - 256
     - 512
-    - 3840 # 768 is the embedding dim of the VIT. 768 will result in 1 token
+    - 1536 # 768 is the embedding dim of the VIT. 768 will result in 1 token
     
   head:
     layer_dims: []
