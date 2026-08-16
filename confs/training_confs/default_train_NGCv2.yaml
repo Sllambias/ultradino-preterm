@@ -19,7 +19,7 @@ data:
     'current_parity', 'current_cervical_length', 'current_hcg', 'current_papp', 'lab_bmi', 'current_hcg_lab_dat',
     'current_papp_lab_dat']
   ehr_categorical_columns: ["alcohol_consumption", "ethnicity", "smoking_status"]
-  img_size: [48, 48]
+  img_size: [224, 224]
   oversample_ratio: 1 #0 = No oversampling
   label_smoothing_param: 2 #0 = No label smoothing
 
