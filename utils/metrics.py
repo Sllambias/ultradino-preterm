@@ -6,11 +6,11 @@ Created on Mon Mar 16 12:03:57 2026
 @author: jacob
 """
 
-import torchmetrics.classification as tm
+import matplotlib.pyplot as plt
 import polars as pl
 import torch
+import torchmetrics.classification as tm
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 
 class Metrics:

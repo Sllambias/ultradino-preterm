@@ -22,3 +22,17 @@ python EHR_extract/table.py --config-name test_SL_ehr_table
 
 ### 4.1 Train locally 
 python train.py confs/training_confs/default_train_local.yaml 
+
+# On NGC
+
+### 1.1 DATA EXISTS: NO-OP
+### 1.2 DATA EXISTS: NO-OP
+
+### 2.1 Generate population with img paths
+python EHR_extract/extract.py --config-name preterm_noMP_34_img_v5
+
+### 3.1 Generate population with img paths AND EHR data
+python EHR_extract/table.py --config-name SL_EHR_noMP_img_v5
+
+### 4.1 Train on NGC
+python train.py confs/training_confs/default_train_local.yaml 
