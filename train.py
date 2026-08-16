@@ -82,7 +82,7 @@ def main(config_path):
                 else:
                     for idx, aux_task in enumerate(cfg.tasks[task]):
                         var, loss_fn, weight = aux_task.values()
-                        labels = data["aux_vars"][:, idx].to(cfg.device.type)
+                        labels = data["aux_vars"][:, idx].to(cfg.device.type).float()
                         loss += loss_fns[loss_fn](outputs[task][var]["logits"], labels.unsqueeze(1)) * weight
             loss.backward()
 
@@ -114,7 +114,7 @@ def main(config_path):
                     else:
                         for idx, aux_task in enumerate(cfg.tasks[task]):
                             var, loss_fn, weight = aux_task.values()
-                            labels = data["aux_vars"][:, idx].to(cfg.device.type)
+                            labels = data["aux_vars"][:, idx].to(cfg.device.type).float()
                             loss += loss_fns[loss_fn](outputs[task][var]["logits"], labels.unsqueeze(1)) * weight
                 val_loss += loss.item() / len(ValLoader)
 
