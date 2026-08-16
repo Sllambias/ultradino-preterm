@@ -30,6 +30,7 @@ class Metrics:
         self.metrics = metrics
         self.df = df
         self.save_path = save_path
+        self.sens_at_spec = 0.0
 
     def update(self, outputs, labels, ID):
         self.df[str(self.cutoff)].append(
@@ -102,6 +103,7 @@ class Metrics:
 
         self.plot_metrics()
         self.df = {str(self.cutoff): []}
+        self.sens_at_spec = self.metrics["avg"][str(self.cutoff)]["SensAtSpec"][-1]
 
 
 def get_metrics(cfg, t=0.5):

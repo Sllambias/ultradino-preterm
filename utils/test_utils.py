@@ -49,7 +49,6 @@ def test_model(folder_path, move=True, batch_size=2):
     val_metrics_df = pl.read_csv(os.path.join(folder_path, "metrics.csv"))
     best_epoch = {}
     val_metrics = {}
-    best_preds = {str(cutoff): {"all": None}}
 
     population_all = {}
 
@@ -69,8 +68,8 @@ def test_model(folder_path, move=True, batch_size=2):
     }
 
     val_metrics[str(cutoff)] = {
-        "avg": val_metrics_df[f"SensAtSpec_cutoff_{cutoff}_avg"],
-        "max": val_metrics_df[f"SensAtSpec_cutoff_{cutoff}_max"],
+        "avg": val_metrics_df[f"SensAtSpec_threshold_{cutoff}_avg"],
+        "max": val_metrics_df[f"SensAtSpec_threshold_{cutoff}_max"],
     }
 
     for i, weights in enumerate(tqdm(dirs)):
@@ -120,22 +119,22 @@ def test_model(folder_path, move=True, batch_size=2):
                 for metric in metrics.values():
                     metric(preds[eval_type], labels)
 
-                sens_spec, sens_spec_cutoff = metrics["SensAtSpec"].compute()
-
-                if sens_spec.item() > best_epoch[str(cutoff)]["all"]["SensAtSpec"]:
-                    best_epoch[str(cutoff)]["all"]["Epoch"] = i
-                    best_epoch[str(cutoff)]["all"]["SensAtSpec"] = sens_spec.item()
-                    best_epoch[str(cutoff)]["all"]["AUC"] = roc_auc_score(df["label"] * 1.0, df[f"pred_{eval_type}"])
-                    best_epoch[str(cutoff)]["all"]["Type"] = eval_type
-                    best_epoch[str(cutoff)]["all"]["Sensitivity"] = metrics["Recall"].compute().item()
-                    best_epoch[str(cutoff)]["all"]["Specificity"] = metrics["Specificity"].compute().item()
-                    best_epoch[str(cutoff)]["all"]["SensAtSpec_cutoff"] = sens_spec_cutoff.item()
-                    best_epoch[str(cutoff)]["all"]["val_sens_at_spec"] = val_metric
-                    best_epoch[str(cutoff)]["all"]["weights"] = weight_path.replace("Running", "Evaluated")
-                    best_preds[str(cutoff)]["all"] = df[["ID", f"pred_{eval_type}", "label"]]
+                sens_spec, sens_spec_threshold = metrics["SensAtSpec"].compute()
+                if eval_type == "avg":
+                    if sens_spec.item() > best_epoch[str(cutoff)]["all"]["SensAtSpec"]:
+                        best_epoch[str(cutoff)]["all"]["Epoch"] = i
+                        best_epoch[str(cutoff)]["all"]["SensAtSpec"] = sens_spec.item()
+                        best_epoch[str(cutoff)]["all"]["SensAtSpec_threshold"] = sens_spec_threshold.item()
+                        best_epoch[str(cutoff)]["all"]["AUC"] = roc_auc_score(df["label"] * 1.0, df[f"pred_{eval_type}"])
+                        best_epoch[str(cutoff)]["all"]["Type"] = eval_type
+                        best_epoch[str(cutoff)]["all"]["Sensitivity"] = metrics["Recall"].compute().item()
+                        best_epoch[str(cutoff)]["all"]["Specificity"] = metrics["Specificity"].compute().item()
+                        best_epoch[str(cutoff)]["all"]["val_sens_at_spec"] = val_metric
+                        best_epoch[str(cutoff)]["all"]["weights"] = weight_path.replace("Running", "Evaluated")
 
     os.makedirs(os.path.join(folder_path, "preds"), exist_ok=True)
-    best_preds[str(cutoff)]["all"].write_csv(os.path.join(folder_path, f"preds/GA_{cutoff}_all.csv"))
+    print(best_epoch)
+    pl.DataFrame(best_epoch[str(cutoff)]["all"]).write_csv(os.path.join(folder_path, f"preds/GA_{cutoff}_all.csv"))
     with open(os.path.join(folder_path, "test_results.txt"), "w") as f:
         f.write(f"\n----------GA {str(cutoff)}----------\n")
         f.write("--All patients--\n")

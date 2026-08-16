@@ -65,7 +65,7 @@ def main(config_path):
 
         model.train()
         train_loss = 0.0
-        pbar = tqdm(TrainLoader, desc=f"Train epoch: {epoch} / {cfg.training.epochs}")
+        pbar = tqdm(TrainLoader, desc=f"Train epoch: {epoch} / {cfg.training.epochs}. Prev SensAtSpec: {metrics.sens_at_spec}")
         for data in pbar:
             optimizer.zero_grad()
             outputs, _ = model(
@@ -122,6 +122,7 @@ def main(config_path):
                 val_loss += loss.item() / len(ValLoader)
                 pbar.set_postfix({"val_loss": val_loss})
         metrics.log_metrics(train_loss, val_loss)
+
         torch.save(model.state_dict(), save_path + "/weights/" + str(epoch).zfill(3) + ".pth")
 
     test_model(save_path)
