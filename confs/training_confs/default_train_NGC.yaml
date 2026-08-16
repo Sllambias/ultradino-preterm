@@ -5,7 +5,7 @@ data:
   test_path: /users/people/seblla/repos/EHR_extract/outputs/tables/table_SL_EHR_noMP_img_v5.csv
   batch_size: 128
   val_frac: 0.05
-  workers: 1
+  workers: 32
   label_column: "GA"
   img_path_column: "NO_OCR_PATH"
   img_metadata_columns: ['PDX', 'PDY']
