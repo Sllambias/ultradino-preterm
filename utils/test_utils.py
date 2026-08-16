@@ -133,7 +133,6 @@ def test_model(folder_path, move=True, batch_size=2):
                         best_epoch[str(cutoff)]["all"]["weights"] = weight_path.replace("Running", "Evaluated")
 
     os.makedirs(os.path.join(folder_path, "preds"), exist_ok=True)
-    print(best_epoch)
     pl.DataFrame(best_epoch[str(cutoff)]["all"]).write_csv(os.path.join(folder_path, f"preds/GA_{cutoff}_all.csv"))
     with open(os.path.join(folder_path, "test_results.txt"), "w") as f:
         f.write(f"\n----------GA {str(cutoff)}----------\n")

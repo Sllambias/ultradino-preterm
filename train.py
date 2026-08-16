@@ -89,7 +89,7 @@ def main(config_path):
 
             train_loss += loss.item() / len(TrainLoader)
             optimizer.step()
-            pbar.set_postfix({"val_loss": train_loss})
+            pbar.set_postfix({"train_loss": train_loss})
 
         scheduler.step()
 
