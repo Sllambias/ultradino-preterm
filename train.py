@@ -65,7 +65,8 @@ def main(config_path):
 
         model.train()
         train_loss = 0.0
-        for data in tqdm(TrainLoader, desc=f"Train epoch: {epoch} / {cfg.training.epochs}"):
+        pbar = tqdm(TrainLoader, desc=f"Train epoch: {epoch} / {cfg.training.epochs}")
+        for data in pbar:
             optimizer.zero_grad()
             outputs, _ = model(
                 data["imgs"].to(cfg.device.type),
@@ -88,6 +89,7 @@ def main(config_path):
 
             train_loss += loss.item() / len(TrainLoader)
             optimizer.step()
+            pbar.set_postfix({"val_loss": train_loss})
 
         scheduler.step()
 
@@ -95,7 +97,8 @@ def main(config_path):
         val_loss = 0
 
         with torch.no_grad():
-            for data in tqdm(ValLoader, desc=f"Val epoch: {epoch} / {cfg.training.epochs}"):
+            pbar = tqdm(ValLoader, desc=f"Val epoch: {epoch} / {cfg.training.epochs}")
+            for data in pbar:
                 outputs, _ = model(
                     data["imgs"].to(cfg.device.type),
                     data["tabular_data"].to(cfg.device.type),
@@ -117,7 +120,7 @@ def main(config_path):
                             labels = data["aux_vars"][:, idx].to(cfg.device.type).float()
                             loss += loss_fns[loss_fn](outputs[task][var]["logits"], labels.unsqueeze(1)) * weight
                 val_loss += loss.item() / len(ValLoader)
-
+                pbar.set_postfix({"val_loss": val_loss})
         metrics.log_metrics(train_loss, val_loss)
         torch.save(model.state_dict(), save_path + "/weights/" + str(epoch).zfill(3) + ".pth")
 

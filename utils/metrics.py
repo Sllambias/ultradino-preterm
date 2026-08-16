@@ -22,7 +22,7 @@ class Metrics:
         metrics = {
             "train_loss": [],
             "val_loss": [],
-            **{agg: {str(cutoff): {"SensAtSpec": [], "SensAtSpec_cutoff": []}} for agg in ("avg", "max")},
+            **{agg: {str(cutoff): {"SensAtSpec": [], "SensAtSpec_threshold": []}} for agg in ("avg", "max")},
         }
 
         self.cutoff = cutoff
@@ -82,10 +82,10 @@ class Metrics:
 
             self.metric.reset()
 
-            sens_spec, sens_spec_cutoff = self.metric(preds, labels)
+            sens_spec, sens_spec_threshold = self.metric(preds, labels)
 
             self.metrics[agg][str(self.cutoff)]["SensAtSpec"].append(sens_spec.item())
-            self.metrics[agg][str(self.cutoff)]["SensAtSpec_cutoff"].append(sens_spec_cutoff.item())
+            self.metrics[agg][str(self.cutoff)]["SensAtSpec_threshold"].append(sens_spec_threshold.item())
 
             for name, values in self.metrics[agg][str(self.cutoff)].items():
                 row[f"{name}_{self.cutoff}_{agg}"] = values[-1]
