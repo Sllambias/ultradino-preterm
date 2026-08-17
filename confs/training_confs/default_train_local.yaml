@@ -8,7 +8,7 @@ random_seed: 9521
 data:
   path: /Users/zcr545/Desktop/Projects/repos/EHR_extract/outputs/test_SL_ehr_table/table_test_SL_ehr_table.csv
   test_path: /Users/zcr545/Desktop/Projects/repos/EHR_extract/outputs/test_SL_ehr_table/table_test_SL_ehr_table.csv
-  batch_size: 128
+  batch_size: 2
   val_frac: 0.05
   workers: 1
   label_column: "GA"
@@ -40,7 +40,7 @@ tasks:
 
 
 training:
-  epochs: 3
+  epochs: 60
   vit_frozen_until: 10  #VIT is frozen until this epoch
   tabular_embedding_block_frozen_until: 2 #EHR is frozen until this epoch
   #Unfreezeing strategy. Unfreeze blocks_per_step every_n_epochs until we reach top_n_blocks are unfrozen.
@@ -72,8 +72,7 @@ model:
   
   embedding_layer_dims:
     - 256
-    - 512
-    - 3840 # 768 is the embedding dim of the VIT. 768 will result in 1 token
+    - 768 # 768 is the embedding dim of the VIT. 768 will result in 1 token
     
 
   head:

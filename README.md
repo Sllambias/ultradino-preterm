@@ -21,7 +21,10 @@ python EHR_extract/extract.py --config-name test_preterm
 python EHR_extract/table.py --config-name test_SL_ehr_table
 
 ### 4.1 Train locally 
-python train.py confs/training_confs/default_train_local.yaml 
+python train.py --config-name default_train_local 
+
+### 5.1 Test locally
+python test.py /Users/zcr545/Desktop/Projects/repos/ultradino-preterm/outputs/default_train_local
 
 # On NGC
 

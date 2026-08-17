@@ -96,7 +96,6 @@ def main(cfg: DictConfig) -> None:
             pbar.set_postfix({"train_loss": train_loss})
 
         scheduler.step()
-
         model.eval()
         val_loss = 0
 
@@ -127,7 +126,8 @@ def main(cfg: DictConfig) -> None:
                 pbar.set_postfix({"val_loss": val_loss})
         metrics.log_metrics(train_loss, val_loss)
 
-        torch.save(model.state_dict(), save_path + "/weights/" + str(epoch).zfill(3) + ".pth")
+        if (epoch + 1 % 5 == 0) or (epoch == cfg.training.epochs) or (epoch == 0):
+            torch.save(model.state_dict(), save_path + "/weights/" + str(epoch).zfill(3) + ".pth")
 
     test_model(save_path)
 

@@ -10,9 +10,7 @@ import os
 import polars as pl
 import torch
 import warnings
-from bias_analysis.bias_analysis import run_analysis
 from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
-from filelock import FileLock
 from omegaconf import OmegaConf
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
@@ -72,14 +70,16 @@ def test_model(folder_path, move=True, batch_size=2):
         "max": val_metrics_df[f"SensAtSpec_threshold_{cutoff}_max"],
     }
 
-    for i, weights in enumerate(tqdm(dirs)):
+    for i, weights in enumerate(dirs):
         weight_path = os.path.join(folder_path, "weights", weights)
+        print("evaluating: ", weight_path)
         model.load_state_dict(torch.load(weight_path, weights_only=True))
         model.eval()
 
         with torch.no_grad():
             df = {str(cutoff): []}
-            for data in TestLoader:
+            pbar = tqdm(TestLoader, desc=f"Checkpoint: {i} / {len(dirs)}")
+            for data in pbar:
                 outputs, _ = model(
                     data["imgs"].to(cfg.device.type),
                     data["tabular_data"].to(cfg.device.type),
@@ -95,7 +95,6 @@ def test_model(folder_path, move=True, batch_size=2):
                         },
                     )
                 )
-
             df = pl.concat(df[str(cutoff)])
             df = df.group_by("ID").agg(
                 [
@@ -120,17 +119,16 @@ def test_model(folder_path, move=True, batch_size=2):
                     metric(preds[eval_type], labels)
 
                 sens_spec, sens_spec_threshold = metrics["SensAtSpec"].compute()
-                if eval_type == "avg":
-                    if sens_spec.item() > best_epoch[str(cutoff)]["all"]["SensAtSpec"]:
-                        best_epoch[str(cutoff)]["all"]["Epoch"] = i
-                        best_epoch[str(cutoff)]["all"]["SensAtSpec"] = sens_spec.item()
-                        best_epoch[str(cutoff)]["all"]["SensAtSpec_threshold"] = sens_spec_threshold.item()
-                        best_epoch[str(cutoff)]["all"]["AUC"] = roc_auc_score(df["label"] * 1.0, df[f"pred_{eval_type}"])
-                        best_epoch[str(cutoff)]["all"]["Type"] = eval_type
-                        best_epoch[str(cutoff)]["all"]["Sensitivity"] = metrics["Recall"].compute().item()
-                        best_epoch[str(cutoff)]["all"]["Specificity"] = metrics["Specificity"].compute().item()
-                        best_epoch[str(cutoff)]["all"]["val_sens_at_spec"] = val_metric
-                        best_epoch[str(cutoff)]["all"]["weights"] = weight_path.replace("Running", "Evaluated")
+                if sens_spec.item() > best_epoch[str(cutoff)]["all"]["SensAtSpec"]:
+                    best_epoch[str(cutoff)]["all"]["Epoch"] = i
+                    best_epoch[str(cutoff)]["all"]["SensAtSpec"] = sens_spec.item()
+                    best_epoch[str(cutoff)]["all"]["SensAtSpec_threshold"] = sens_spec_threshold.item()
+                    best_epoch[str(cutoff)]["all"]["AUC"] = roc_auc_score(df["label"] * 1.0, df[f"pred_{eval_type}"])
+                    best_epoch[str(cutoff)]["all"]["Type"] = eval_type
+                    best_epoch[str(cutoff)]["all"]["Sensitivity"] = metrics["Recall"].compute().item()
+                    best_epoch[str(cutoff)]["all"]["Specificity"] = metrics["Specificity"].compute().item()
+                    best_epoch[str(cutoff)]["all"]["val_sens_at_spec"] = val_metric
+                    best_epoch[str(cutoff)]["all"]["weights"] = weight_path.replace("Running", "Evaluated")
 
     os.makedirs(os.path.join(folder_path, "preds"), exist_ok=True)
     pl.DataFrame(best_epoch[str(cutoff)]["all"]).write_csv(os.path.join(folder_path, f"preds/GA_{cutoff}_all.csv"))
@@ -142,3 +140,6 @@ def test_model(folder_path, move=True, batch_size=2):
                 value = round(value, 3)
             f.write(f"\t {key} : {value}\n")
         f.write("\n")
+        f.write("raw predictions: \n")
+        for row in df.rows(named=True):
+            f.write(f"Pred: {row['pred_avg']} Label: {row['label']} ID: {row['ID']} \n")
