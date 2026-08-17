@@ -7,10 +7,11 @@ Created on Wed Mar  4 09:41:00 2026
 """
 
 import argparse
+import hydra
 import torch
 import warnings
 from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
-from omegaconf import OmegaConf
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils.loss_utils import fix_labels, get_loss
@@ -24,11 +25,14 @@ warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
 
-def main(config_path):
-    cfg = OmegaConf.load(config_path)
-
+@hydra.main(
+    config_path="./confs/training_confs",
+    config_name="default",
+    version_base="1.2",
+)
+def main(cfg: DictConfig) -> None:
     save_path = setup(cfg)
-
+    print(cfg)
     train_df, val_df = make_data_split(cfg, cfg.data.path, unique_column="CPR_MOR")
     TrainData = PreTermDataset(train_df, cfg, train=True)
     ValData = PreTermDataset(val_df, cfg, train=False)
@@ -129,10 +133,4 @@ def main(config_path):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train preterm prediction model")
-    parser.add_argument(
-        "config",
-        help="Full path to training config YAML (info.name sets the run folder)",
-    )
-    args = parser.parse_args()
-    main(args.config)
+    main()

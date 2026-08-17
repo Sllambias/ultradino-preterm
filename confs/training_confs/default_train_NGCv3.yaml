@@ -1,4 +1,9 @@
-output_dir: /users/people/seblla/repos/ultradino-preterm/outputs/v2
+hydra:
+  output_subdir: log
+  run:
+    dir: ${output_dir}
+
+output_dir: /users/people/seblla/repos/ultradino-preterm/outputs/${hydra:job.config_name}
 random_seed: 9521
 data:
   path: /users/people/seblla/repos/EHR_extract/outputs/tables/SL_EHR_noMP_img_v5/table_SL_EHR_noMP_img_v5.csv
@@ -67,9 +72,9 @@ model:
     
 optimizer:
   type: AdamW
-  lr1: 5e-3 #Used while ViT is frozen
-  lr2: 5e-4 #Used while ViT is unfrozen
-  lr_decay: 0.75
+  lr1: 1e-3 #Used while ViT is frozen
+  lr2: 1e-4 #Used while ViT is unfrozen
+  lr_decay: 0.9
   weight_decay: 1e-2
 
   #AdamW
