@@ -70,9 +70,9 @@ def test_model(folder_path, move=True, batch_size=2):
         "max": val_metrics_df[f"SensAtSpec_threshold_{cutoff}_max"],
     }
 
-    for i, weights in enumerate(dirs):
+    for weights in dirs:
         weight_path = os.path.join(folder_path, "weights", weights)
-        print("evaluating: ", weight_path)
+        print("evaluating: ", weights)
         model.load_state_dict(torch.load(weight_path, weights_only=True))
         model.eval()
 
@@ -120,7 +120,7 @@ def test_model(folder_path, move=True, batch_size=2):
 
                 sens_spec, sens_spec_threshold = metrics["SensAtSpec"].compute()
                 if sens_spec.item() > best_epoch[str(cutoff)]["all"]["SensAtSpec"]:
-                    best_epoch[str(cutoff)]["all"]["Epoch"] = i
+                    best_epoch[str(cutoff)]["all"]["Checkoipoint"] = weights
                     best_epoch[str(cutoff)]["all"]["SensAtSpec"] = sens_spec.item()
                     best_epoch[str(cutoff)]["all"]["SensAtSpec_threshold"] = sens_spec_threshold.item()
                     best_epoch[str(cutoff)]["all"]["AUC"] = roc_auc_score(df["label"] * 1.0, df[f"pred_{eval_type}"])
