@@ -31,11 +31,15 @@ python test.py /Users/zcr545/Desktop/Projects/repos/ultradino-preterm/outputs/de
 ### 1.1 DATA EXISTS: NO-OP
 ### 1.2 DATA EXISTS: NO-OP
 
-### 2.1 Generate population with img paths
+### 2.1 Generate TRAIN population with img paths
 python EHR_extract/extract.py --config-name preterm_noMP_34_img_v5
+### 2.2 Generate TEST population with img paths
+python EHR_extract/extract.py --config-name preterm_P1_noMP_34_img_v5
 
-### 3.1 Generate population with img paths AND EHR data
+### 3.1 Generate TRAIN population with img paths AND EHR data
 python EHR_extract/table.py --config-name SL_EHR_noMP_img_v5
+### 3.2 Generate TEST population with img paths AND EHR data
+python EHR_extract/table.py --config-name SL_EHR_P1_noMP_img_v5
 
 ### 4.1 Train on NGC
 python train.py confs/training_confs/default_train_NGC.yaml 

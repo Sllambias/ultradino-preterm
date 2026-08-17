@@ -22,10 +22,11 @@ warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
 
-def test_model(folder_path, move=True, batch_size=2):
+def test_model(folder_path, batch_size=2, test_data_path=None):
     cfg = OmegaConf.load(os.path.join(folder_path, "conf.yaml"))
-
-    df = make_data_split(cfg, cfg.data.test_path, unique_column="CPR_MOR", training=False)
+    if test_data_path is None:
+        test_data_path = cfg.data.test_path
+    df = make_data_split(cfg, test_data_path, unique_column="CPR_MOR", training=False)
     TestData = PreTermDataset(df, cfg, train=False)
     TestLoader = DataLoader(
         TestData,
@@ -70,7 +71,7 @@ def test_model(folder_path, move=True, batch_size=2):
         "max": val_metrics_df[f"SensAtSpec_threshold_{cutoff}_max"],
     }
 
-    for weights in dirs:
+    for i, weights in enumerate(dirs):
         weight_path = os.path.join(folder_path, "weights", weights)
         print("evaluating: ", weights)
         model.load_state_dict(torch.load(weight_path, weights_only=True))

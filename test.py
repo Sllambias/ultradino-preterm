@@ -10,7 +10,7 @@ from omegaconf import DictConfig
     version_base="1.2",
 )
 def main(cfg: DictConfig) -> None:
-    test_model(cfg.model_dir, batch_size=cfg.get("batch_size", 128))
+    test_model(cfg.model_dir, batch_size=cfg.get("batch_size", 128), test_data_path=cfg.test_data_path)
 
 
 if __name__ == "__main__":
