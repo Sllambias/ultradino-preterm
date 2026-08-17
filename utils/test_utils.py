@@ -78,7 +78,7 @@ def test_model(folder_path, move=True, batch_size=2):
 
         with torch.no_grad():
             df = {str(cutoff): []}
-            pbar = tqdm(TestLoader, desc=f"Checkpoint: {i} / {len(dirs)}")
+            pbar = tqdm(TestLoader, desc=f"Checkpoint: {weights} / {len(dirs)}")
             for data in pbar:
                 outputs, _ = model(
                     data["imgs"].to(cfg.device.type),
