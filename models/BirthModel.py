@@ -61,12 +61,16 @@ class BirthModel(nn.Module):
         #Generate outputs
         outputs = {'preterm': {},
                    'aux_tasks': {}}
-        
-        for GA, preterm_head in self.preterm_heads.items():
-            outputs['preterm'][GA] = preterm_head(features)
-            
-        for var, aux_task_head in self.aux_task_heads.items():
-            outputs['aux_tasks'][var] = aux_task_head(features)
+
+        #Heads run in fp32, so predictions keep full precision under bf16 autocast
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            features = features.float()
+
+            for GA, preterm_head in self.preterm_heads.items():
+                outputs['preterm'][GA] = preterm_head(features)
+
+            for var, aux_task_head in self.aux_task_heads.items():
+                outputs['aux_tasks'][var] = aux_task_head(features)
 
         return outputs, features
             

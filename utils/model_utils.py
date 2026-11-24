@@ -151,6 +151,11 @@ def update_freezing(model, epoch, cfg):
         model.unfreeze_vit(model.vit_model, n, cfg)
 
 
+def mixed_precision(cfg):
+    """bf16 autocast when training.bf16 is set. Configs without the key keep fp32"""
+    return torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16, enabled=cfg.training.get("bf16", False))
+
+
 def set_train_mode(model):
     """Train mode, except frozen ViT blocks, so stochastic depth is off while they are frozen"""
     model.train()

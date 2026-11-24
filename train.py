@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from dataloader.dataloader import DataSplits
-from utils.model_utils import model_from_conf, update_freezing, set_train_mode
+from utils.model_utils import model_from_conf, update_freezing, set_train_mode, mixed_precision
 from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
 from utils.loss_utils import ModelLoss
 from utils.metrics import Metrics
@@ -48,10 +48,11 @@ for fold in range(cfg.data.folds):
 
         for data in tqdm(TrainLoader, desc='Training'):
             optimizer.zero_grad()
-            outputs, _ = model(data['imgs'].to(cfg.device.type), 
-                               data['img_data'].to(cfg.device.type), 
-                               data['ehr_data'].to(cfg.device.type),
-                               data['segmentation'].to(cfg.device.type))
+            with mixed_precision(cfg):
+                outputs, _ = model(data['imgs'].to(cfg.device.type),
+                                   data['img_data'].to(cfg.device.type),
+                                   data['ehr_data'].to(cfg.device.type),
+                                   data['segmentation'].to(cfg.device.type))
 
             loss = Loss(outputs, data)
             loss.backward()
@@ -64,10 +65,11 @@ for fold in range(cfg.data.folds):
         
         with torch.no_grad():
             for data in tqdm(ValLoader, desc='Validating'):
-                outputs, _ = model(data['imgs'].to(cfg.device.type), 
-                                   data['img_data'].to(cfg.device.type), 
-                                   data['ehr_data'].to(cfg.device.type),
-                                   data['segmentation'].to(cfg.device.type))
+                with mixed_precision(cfg):
+                    outputs, _ = model(data['imgs'].to(cfg.device.type),
+                                       data['img_data'].to(cfg.device.type),
+                                       data['ehr_data'].to(cfg.device.type),
+                                       data['segmentation'].to(cfg.device.type))
                 
                 metrics.update(outputs, data)
                 
@@ -86,10 +88,11 @@ for fold in range(cfg.data.folds):
         model.eval()
         with torch.no_grad():
             for data in tqdm(TestLoader, desc=f"Testing GA {cutoff} model"):
-                outputs, _ = model(data['imgs'].to(cfg.device.type), 
-                                   data['img_data'].to(cfg.device.type), 
-                                   data['ehr_data'].to(cfg.device.type),
-                                   data['segmentation'].to(cfg.device.type))
+                with mixed_precision(cfg):
+                    outputs, _ = model(data['imgs'].to(cfg.device.type),
+                                       data['img_data'].to(cfg.device.type),
+                                       data['ehr_data'].to(cfg.device.type),
+                                       data['segmentation'].to(cfg.device.type))
                 
                 metrics.update(outputs, data, cutoff)
                 
