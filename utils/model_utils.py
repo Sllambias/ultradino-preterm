@@ -20,21 +20,26 @@ logger = logging.getLogger("model_loader")
 def vit_from_conf(cfg):    
     if cfg.data.img_size[0] != cfg.data.img_size[1]:
         raise Exception(f"Models only support square images. You have {cfg.data.img_size}")
-    img_size = cfg.data.img_size[0] 
-    
+    img_size = cfg.data.img_size[0]
+
+    #Stochastic depth while the ViT trains. Configs without the key keep ultradino-finetune's 0.3
+    drop_path_rate = cfg.model.vit.get("drop_path_rate", 0.3)
+
     if cfg.model.vit.weights_path.endswith('.pth'):
         match = re.search(r'vit\w{3}', cfg.model.vit.weights_path)
         model_type = match.group() if match else None
 
         if model_type is not None:
-            model = vit_load.load_pretrained_ultradino(model_type, cfg.model.vit.weights_path, img_size=img_size)
+            model = vit_load.load_pretrained_ultradino(model_type, cfg.model.vit.weights_path, img_size=img_size,
+                                                       drop_path_rate=drop_path_rate)
             logger.info('Loading pretrained encoder from %s', cfg.model.vit.weights_path)
         else:
             raise Exception("Weight path must contain the model type [Vits16/Vitb16/Vitl16]\n"
                             "E.g. 'oversampled_vitb16.pth'")
         
     else:
-        model = vit_load.load_from_scratch(cfg.model.vit.weights_path, img_size=img_size)
+        model = vit_load.load_from_scratch(cfg.model.vit.weights_path, img_size=img_size,
+                                           drop_path_rate=drop_path_rate)
         logger.info(f"Loading {cfg.model.vit.weights_path} encoder from scratch")
     return model
 
@@ -86,13 +91,18 @@ def model_from_conf(cfg, weights_path=None):
     model_parts['ehr_model'] = ehr_model
     
     #Transforms
-    img_data_transform = Transform(len(cfg.data.img_data), 
+    #Configs without the key keep raw inputs, so their checkpoints still load
+    normalize_inputs = cfg.model.transforms.get("normalize_inputs", False)
+
+    img_data_transform = Transform(len(cfg.data.img_data),
                                    vit_model.embed_dim,
-                                   layer_dims=cfg.model.transforms.vit_layer_dims)
-    
-    ehr_transform = Transform(ehr_model.embed_dim, 
+                                   layer_dims=cfg.model.transforms.vit_layer_dims,
+                                   normalize_inputs=normalize_inputs)
+
+    ehr_transform = Transform(ehr_model.embed_dim,
                               vit_model.embed_dim,
-                              layer_dims=cfg.model.transforms.ehr_layer_dims)
+                              layer_dims=cfg.model.transforms.ehr_layer_dims,
+                              normalize_inputs=normalize_inputs)
         
     segmentation_transform = CNNTransform(cfg.data.img_size, 
                                           vit_model.embed_dim,
@@ -139,5 +149,13 @@ def update_freezing(model, epoch, cfg):
     if epoch >= cfg.training.vit_frozen_until:
         n = epoch - cfg.training.vit_frozen_until
         model.unfreeze_vit(model.vit_model, n, cfg)
+
+
+def set_train_mode(model):
+    """Train mode, except frozen ViT blocks, so stochastic depth is off while they are frozen"""
+    model.train()
+    for block in model.vit_model.blocks:
+        if not any(p.requires_grad for p in block.parameters()):
+            block.eval()
 
             

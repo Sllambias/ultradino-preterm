@@ -49,16 +49,18 @@ model:
     #weights_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/other_models/weights/oversampled_vitb16_512_xfold.pth #VitB
     #weights_path: 'vitb16' #VitB from scratch
     dropout: 0.2
-  
+    drop_path_rate: 0.1 #Stochastic depth while the ViT trains (ultradino-finetune default is 0.3)
+
   ehr:
-    weights_path: 
+    weights_path:
     dropout: 0.2
-    
+
   transforms:
     vit_layer_dims: []
     ehr_layer_dims: []
     seg_channel_dims: []
     dropout: 0.2
+    normalize_inputs: True #BatchNorm on ehr_data and img_data before they become tokens
     
   head:
     layer_dims: []

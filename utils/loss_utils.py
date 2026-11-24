@@ -83,8 +83,12 @@ class ModelLoss():
     def label_smoothing(self, data, cutoff, smoothing=2, window=2):
         ga = data['labels']['GA_weeks']
         labels = (ga < cutoff).float()
-        mask = (ga >= cutoff - window) & (ga <= cutoff + window)
-        soft_labels = torch.sigmoid((cutoff - ga) / smoothing)
+        if smoothing == 0:
+            return labels
+
+        #Centred between the last preterm week (cutoff - 1) and the first term week (cutoff)
+        mask = (ga >= cutoff - window) & (ga < cutoff + window)
+        soft_labels = torch.sigmoid((cutoff - 0.5 - ga) / smoothing)
         labels[mask] = soft_labels[mask]
 
         return labels

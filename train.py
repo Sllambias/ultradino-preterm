@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from dataloader.dataloader import DataSplits
-from utils.model_utils import model_from_conf, update_freezing
+from utils.model_utils import model_from_conf, update_freezing, set_train_mode
 from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
 from utils.loss_utils import ModelLoss
 from utils.metrics import Metrics
@@ -45,7 +45,7 @@ for fold in range(cfg.data.folds):
 
     for epoch in range(cfg.training.epochs):
         update_freezing(model, epoch, cfg)
-        model.train()
+        set_train_mode(model)
 
         for data in tqdm(TrainLoader, desc='Training'):
             optimizer.zero_grad()

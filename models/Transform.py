@@ -11,12 +11,19 @@ from torch import nn
 from models.layers.FCLayer import FCLayer
         
 class Transform(nn.Module):
-    def __init__(self, num_inputs, num_outputs, layer_dims=[]):
+    def __init__(self, num_inputs, num_outputs, layer_dims=[], normalize_inputs=False):
         super().__init__()
 
-        self.num_inputs = num_inputs        
+        self.num_inputs = num_inputs
         self.num_ouputs = num_outputs
         self.layer_dims = layer_dims + [num_outputs]
+
+        #Standardise raw inputs (e.g. GA in days), otherwise the ViT's LayerNorm erases their value
+        #BatchNorm1d can't take zero inputs (ehr_data: [])
+        if normalize_inputs and num_inputs > 0:
+            self.norm = nn.BatchNorm1d(num_inputs)
+        else:
+            self.norm = nn.Identity()
 
         layers = []
         last_dim = num_inputs
@@ -28,6 +35,8 @@ class Transform(nn.Module):
         self.fc = nn.Sequential(*layers)
         
     def forward(self, x):
+        #x is (B, 1, num_inputs) and BatchNorm1d normalises dim 1
+        x = self.norm(x.transpose(1, 2)).transpose(1, 2)
         features = self.fc(x)
         return features
 

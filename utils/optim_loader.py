@@ -59,6 +59,10 @@ def get_layer_id(name, n_layers):
     if name.startswith("patch_embed"):
         return 0
 
+    #Embeddings get the lowest learning rate, as in DINOv2
+    elif name in ["cls_token", "pos_embed", "register_tokens", "mask_token"]:
+        return 0
+
     elif name.startswith("blocks"):
         block_id = int(name.split(".")[1])
         return block_id + 1
@@ -75,10 +79,11 @@ def decay_lr(model, base_lr, lr_decay, weight_decay):
         layer_id = get_layer_id(name, n_layers)
         scale = lr_decay ** (n_layers - layer_id)
 
+        #No weight decay on biases, norms, LayerScale and tokens
         if param.ndim != 1 and name.endswith('.weight'):
             wd = weight_decay
         else:
-            wd = 1.0
+            wd = 0.0
 
         param_groups.append({"params": [param],
                              "lr": base_lr * scale,
