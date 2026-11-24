@@ -6,9 +6,24 @@ Created on Sun Apr 19 11:30:20 2026
 @author: jacob
 """
 
+from datetime import datetime
 from omegaconf import OmegaConf
 import os
 import shutil
+
+
+def timestamp(pattern):
+    """Current time in a strftime pattern, used as ${now:<pattern>} in configs"""
+    return datetime.now().strftime(pattern)
+
+
+def load_config(path):
+    """Load a config and resolve it once, so ${now:...} is the same timestamp for the whole run"""
+    OmegaConf.register_new_resolver("now", timestamp, use_cache=True, replace=True)
+    cfg = OmegaConf.load(path)
+    OmegaConf.resolve(cfg)
+    return cfg
+
 
 def setup(cfg):
     if cfg.info.name is None:
@@ -18,7 +33,10 @@ def setup(cfg):
         name = f"{cfg.info.name}_{cfg.tasks.preterm.cutoffs[0]}"
     else:
         name = f"{cfg.info.name}_multihead"
-    path = f"/projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/{name}/"
+
+    #Configs without info.output_dir keep the old training_runs folder
+    output_dir = cfg.info.get("output_dir", "/projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/")
+    path = os.path.join(output_dir, name) + "/"
 
     if cfg.info.name == "test":
         if os.path.exists(path):

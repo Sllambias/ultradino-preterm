@@ -6,7 +6,6 @@ Created on Wed Mar  4 09:41:00 2026
 @author: jacob
 """
 #%%Imports
-from omegaconf import OmegaConf
 import torch
 from tqdm import tqdm
 
@@ -15,14 +14,14 @@ from utils.model_utils import model_from_conf, update_freezing, set_train_mode
 from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
 from utils.loss_utils import ModelLoss
 from utils.metrics import Metrics
-from utils.utils import setup
+from utils.utils import setup, load_config
 
 import warnings
 warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
-#%%Load config and setup logger(s) 
-cfg = OmegaConf.load("/projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/training_confs/append_tokens_vitb16.yaml")
+#%%Load config and setup logger(s)
+cfg = load_config("/projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/training_confs/append_tokens_vitb16.yaml")
 
 save_path = setup(cfg)
 

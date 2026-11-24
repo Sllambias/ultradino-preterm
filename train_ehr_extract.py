@@ -8,7 +8,6 @@ Usage: python train_ehr_extract.py confs/training_confs/ehr_extract_P1_img_v7.ya
 #%%Imports
 import argparse
 
-from omegaconf import OmegaConf
 import torch
 from tqdm import tqdm
 
@@ -17,7 +16,7 @@ from utils.model_utils import model_from_conf, update_freezing, set_train_mode
 from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
 from utils.loss_utils import ModelLoss
 from utils.metrics import Metrics
-from utils.utils import setup
+from utils.utils import setup, load_config
 
 import warnings
 warnings.filterwarnings("ignore", message="The image is already gray.")
@@ -28,7 +27,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("config", help="Training config with the EHR_extract parquets in data.train_path/test_path")
 args = parser.parse_args()
 
-cfg = OmegaConf.load(args.config)
+cfg = load_config(args.config)
 
 save_path = setup(cfg)
 
