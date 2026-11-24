@@ -32,6 +32,7 @@ tasks:
 
 training:
   epochs: 40
+  bf16: True #bf16 mixed precision (autocast). The prediction heads stay fp32
   vit_frozen_until: 10  #VIT is frozen until this epoch
   ehr_frozen_until: 10 #EHR is frozen until this epoch
   #Unfreezeing strategy. Unfreeze blocks_per_step every_n_epochs until top_n_blocks are unfrozen.
