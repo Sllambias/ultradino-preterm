@@ -3,8 +3,8 @@ info:
 
 data:
   # EHR_extract preterm_P1_img_v7 outputs, split on CPR_MOR by its holdout_csv (EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_P1_img_v7)
-  train_path: /projects/users/data/UCPH/DeepFetal/projects/common/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_train.parquet
-  test_path: /projects/users/data/UCPH/DeepFetal/projects/common/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_test.parquet
+  train_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_train.parquet
+  test_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_test.parquet
   # NO_OCR_FILE_PATH is joined onto this folder (absolute paths are kept as they are)
   image_root: /projects/users/data/UCPH/DeepFetal/ultrasound/PNG_PROCESSED_NO_OCR_TMP_DIR
   batch_size: 128
