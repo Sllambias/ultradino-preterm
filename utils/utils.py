@@ -36,7 +36,8 @@ def setup(cfg):
 
     #Configs without info.output_dir keep the old training_runs folder
     output_dir = cfg.info.get("output_dir", "/projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/")
-    path = os.path.join(output_dir, name) + "/"
+    #Expand ~, which os.path.join would otherwise keep as a folder named "~"
+    path = os.path.join(os.path.expanduser(output_dir), name) + "/"
 
     if cfg.info.name == "test":
         if os.path.exists(path):

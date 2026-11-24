@@ -41,6 +41,42 @@ def load_population(path, image_root):
     return df
 
 
+def population_counts(df, cutoff):
+    """Rows, children, mothers and preterm children in a population table."""
+    return {"rows": len(df),
+            "children": df["CPR_BARN"].n_unique(),
+            "mothers": df["CPR_MOR"].n_unique(),
+            f"children GA < {cutoff}": df.filter(pl.col("GA") // 7 < cutoff)["CPR_BARN"].n_unique()}
+
+
+def remove_excluded(df, cfg, name):
+    """Drop planned preterm births and rows flagged in data.remove, printing the counts before and after."""
+    missing = [var for var in cfg.data.remove if var not in df.columns]
+    if missing:
+        raise ValueError(f"The {name} population has no columns {missing} from data.remove")
+
+    # No-MP rule: preterm births after a planned C-section or induction are left out.
+    # With several cutoffs, the highest one is used for every head.
+    cutoff = max(cfg.tasks.preterm.cutoffs)
+    planned = pl.col("c-section_acute").fill_null(False) | pl.col("induced_acute").fill_null(False)
+    reasons = {f"planned birth at GA < {cutoff} weeks": (pl.col("GA") // 7 < cutoff) & planned}
+    for var in cfg.data.remove:
+        reasons[var] = pl.col(var).cast(pl.Boolean).fill_null(False)
+
+    kept = df.filter(~pl.any_horizontal(list(reasons.values())))
+
+    before = population_counts(df, cutoff)
+    after = population_counts(kept, cutoff)
+    print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks and data.remove {list(cfg.data.remove)}")
+    for column in before:
+        print(f"  {column:20s} {before[column]:>10,} -> {after[column]:>10,}  ({before[column] - after[column]:,} removed)")
+    print("  children matching each reason (a child can match several):")
+    for reason, expression in reasons.items():
+        print(f"    {reason}: {df.filter(expression)['CPR_BARN'].n_unique():,}")
+
+    return kept
+
+
 def assign_folds(df, folds, seed):
     """Give each mother one fold, spreading every GA group evenly over the folds."""
     groups = (df.group_by("CPR_MOR").agg(pl.col("GA").min().alias("GA"))
@@ -68,7 +104,7 @@ class EHRExtractDataset(PreTermDataset):
         if self.get_segs:
             raise ValueError("EHR_extract populations have no segmentation_path, so segmentation can't be used")
 
-        missing = [var for var in list(self.ehr_vars) + self.aux_vars + list(self.remove) if var not in df.columns]
+        missing = [var for var in list(self.ehr_vars) + self.aux_vars if var not in df.columns]
         if missing:
             raise ValueError(f"The EHR_extract population has no columns {missing}")
 
@@ -86,17 +122,6 @@ class EHRExtractDataset(PreTermDataset):
         self.physical_deltas = {"PDX": df["PDX"].fill_null(0.0).to_numpy(),
                                 "PDY": df["PDY"].fill_null(0.0).to_numpy()}
         self.treatment = (df["progesterone"] | df["cerclage"]).to_list()
-
-        # No-MP loss mask: preterm births after a planned C-section or induction are left out
-        planned = (df["c-section_acute"] | df["induced_acute"]).to_numpy()
-        removed = np.zeros(len(df), dtype=bool)
-        for var in self.remove:
-            removed |= df[var].cast(pl.Boolean).fill_null(False).to_numpy()
-
-        self.masks = {}
-        for cutoff in self.cutoffs:
-            preterm = self.ga // 7 < cutoff
-            self.masks[str(cutoff)] = ~(preterm & planned) & ~removed
 
     def __len__(self):
         return len(self.image_paths)
@@ -128,7 +153,8 @@ class EHRExtractDataset(PreTermDataset):
         for var in self.aux_vars:
             labels[var] = torch.tensor([float(self.aux_labels[var][idx])])
 
-        masks = {cutoff: torch.tensor(bool(mask[idx])) for cutoff, mask in self.masks.items()}
+        # Excluded rows were filtered out in EHRExtractDataSplits, so every row counts in the loss and metrics
+        masks = {str(cutoff): torch.tensor(True) for cutoff in self.cutoffs}
 
         return {'imgs': imgs,
                 'img_path': img_path,
@@ -158,6 +184,10 @@ class EHRExtractDataSplits:
 
         test_df = load_population(cfg.data.test_path, cfg.data.image_root)
         train_df = load_population(cfg.data.train_path, cfg.data.image_root)
+
+        # Filtered before folds and oversampling, so both only see rows that are trained and evaluated on
+        test_df = remove_excluded(test_df, cfg, "test")
+        train_df = remove_excluded(train_df, cfg, "train")
 
         self.train_df = train_df.with_columns(pl.lit(-1, dtype=pl.Int64).alias("fold"))
         self.test_df = assign_folds(test_df, self.folds, self.seed)

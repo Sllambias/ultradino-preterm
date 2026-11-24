@@ -1,6 +1,6 @@
 info:
   name: ehr_extract_P1_img_v7_${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
-  output_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/ #Run is saved in <output_dir>/<name>_<cutoff>/
+  output_dir: ~/repos/ultradino-preterm/outputs
 
 data:
   # EHR_extract preterm_P1_img_v7 outputs, split on CPR_MOR by its holdout_csv (EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_P1_img_v7)
@@ -17,7 +17,9 @@ data:
   segmentation: False #EHR_extract has no segmentation_path
   img_size: [224, 224]
   oversample_ratio: 1 #0 = No oversampling
-  remove: [multi_birth, c-section_acute, induced_acute] #Loss mask and metrics leave out rows where these columns are True
+  #Rows where these columns are True are filtered out before training.
+  #c-section_acute and induced_acute are always filtered out below the highest cutoff (no-MP rule), so don't list them here
+  remove: [multi_birth]
 
 tasks:
   preterm:
