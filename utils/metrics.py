@@ -11,96 +11,395 @@ import polars as pl
 import torch
 from pathlib import Path
 import matplotlib.pyplot as plt
+import numpy as np
 
 class Metrics():
     def __init__(self, cfg, save_path):
-        cutoffs = cfg.tasks.preterm.cutoffs
-        metric = tm.SensitivityAtSpecificity(min_specificity=0.85, task='binary').to(cfg.device.type)
+        self.cutoffs = cfg.tasks.preterm.cutoffs
+        self.epoch = 0
+        self.fold = 0
+        self.device = cfg.device.type
+        self.n_bootstrap = 10000
 
-        dfs = {str(c): [] for c in cutoffs}
-        metrics = {'train_loss': [],
-                   'val_loss': [],
-                   **{agg: {str(c): {'SensAtSpec': [],
-                                     'SensAtSpec_cutoff': []} 
-                            for c in cutoffs} for agg in ("avg", "max")}}
+        self.dfs = {str(c): [] for c in self.cutoffs}
+        self.test_preds = {str(c): [] for c in self.cutoffs}
+        self.save_path = Path(save_path)
+        self.best_score = {str(c): {'score': -float("inf"),
+                                    'threshold': None,
+                                    'epoch': -1,
+                                    'agg': None,
+                                    'tta': None} for c in self.cutoffs}
+        self.best_predictions = {str(c): None for c in self.cutoffs}
+        self.best_df = {}
         
-        self.cutoffs = cutoffs
-        self.metric = metric
-        self.metrics = metrics
-        self.dfs = dfs
-        self.save_path = save_path
+        self.pred_path = Path(self.save_path) / "predictions" 
+        self.metrics_path = Path(self.save_path) / "metrics"
+        self.plot_path = Path(self.save_path) / "plots"
         
-    def update(self, outputs, data):
-        for cutoff in self.cutoffs:
-            self.dfs[str(cutoff)].append(pl.DataFrame({'cpr': data['IDs'],
+        (self.pred_path / "validation").mkdir(parents=True, exist_ok=True)
+        self.metrics_path.mkdir(parents=True, exist_ok=True)
+        self.plot_path.mkdir(parents=True, exist_ok=True)
+        
+        self.agg_fns = {"avg": pl.col("preds").mean(),
+                        "max": pl.col("preds").max(),
+                        "quantile": pl.col("preds").quantile(0.75)}
+
+        self.metrics = self.get_metrics()
+
+
+    def update(self, outputs, data, cutoff=None):
+        if cutoff is None:
+            cutoffs = self.cutoffs
+        else:
+            cutoffs = [cutoff]
+        for cutoff in cutoffs:
+            mask = data["masks"][str(cutoff)].flatten().cpu().numpy()
+            self.dfs[str(cutoff)].append(pl.DataFrame({'CPR_CHILD': data['IDs'],
+                                                       'img_path': data['img_paths'],
                                                        'preds': outputs['preterm'][str(cutoff)]['preds'].flatten().cpu().numpy(),
-                                                       'label': (data['GA_weeks'] < float(cutoff)).flatten().cpu().numpy()}))
-    
-    def plot_metrics(self):
-        for agg in ["avg", "max"]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(self.metrics['train_loss'], label='Train Loss')
-            ax.plot(self.metrics['val_loss'], label='Val Loss')
-            for cutoff in self.cutoffs:
-                ax.plot(self.metrics[agg][str(cutoff)]['SensAtSpec'],
-                        label=f"{cutoff} weeks")
-        
-            ax.set_title(agg.capitalize())
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Sensitivity @ 85% Specificity")
-            ax.set_ylim(0, 1.05)
-            ax.legend(loc="upper left")
-    
-            plt.tight_layout()
-            fig.savefig(Path(self.save_path) / f"{agg}_metrics.png", dpi=300)
-            plt.close(fig)
-        
-    def log_metrics(self, train_loss, val_loss):
+                                                       'label': (data['labels']['GA_weeks'] < float(cutoff)).flatten().cpu().numpy(),
+                                                       'treatment': data['treatment']}).filter(mask))
 
-        self.metrics['train_loss'].append(round(train_loss, 5))
-        self.metrics['val_loss'].append(round(val_loss, 5))
-        
-        row = {'train_loss': round(train_loss, 5), 'val_loss': round(val_loss, 5)}
-        
+    def log_epoch(self, train_loss, val_loss):
+        self.epoch += 1
         for cutoff in self.cutoffs:
             df = pl.concat(self.dfs[str(cutoff)])
-            patient_df = (df.group_by("cpr").agg([pl.col('preds').mean().alias('avg'),
-                                                  pl.col('preds').max().alias('max'),
-                                                  pl.col('label').first().alias('label')]))
-
-            labels = torch.tensor(patient_df['label'].to_numpy(), dtype=torch.int32)
+        
+            patient_aggs = ([expr.alias(name) for name, expr in self.agg_fns.items()] 
+                            + [pl.col("label").first().alias("label"),
+                               pl.col("treatment").first().alias("treatment")])
             
-            for agg in ['avg', 'max']:
-                preds = torch.tensor(patient_df[agg].to_numpy(), dtype=torch.float32)
+            patient_df_tta = df.group_by("CPR_CHILD").agg(patient_aggs)
+            
+            patient_df_no_tta = (df.filter(pl.col("img_path").str.ends_with("_1"))
+                                 .group_by("CPR_CHILD").agg(patient_aggs))
+            
+            patient_dfs = {'tta': patient_df_tta,
+                           'no-tta': patient_df_no_tta}
+            
 
-                self.metric.reset()          
+            for agg in ['avg', 'quantile', 'max']:
+                metrics = {}                        
 
-                sens_spec, sens_spec_cutoff = self.metric(preds, labels)
-                
-                self.metrics[agg][str(cutoff)]['SensAtSpec'].append(sens_spec.item())
-                self.metrics[agg][str(cutoff)]['SensAtSpec_cutoff'].append(sens_spec_cutoff.item())
+                for name, metric in self.metrics.items():
+                    for tta in ['tta', 'no-tta']:
+                        preds = torch.tensor(patient_dfs[tta][agg].to_numpy(), dtype=torch.float32)
+                        labels = torch.tensor(patient_dfs[tta]['label'].to_numpy(), dtype=torch.int32)
 
-                for name, values in self.metrics[agg][str(cutoff)].items():
-                    row[f"{name}_{cutoff}_{agg}"] = values[-1]
+                        metric.reset()
+                        output = metric(preds, labels)
                     
-        metrics_df = pl.DataFrame([row])
+                        if isinstance(output, tuple):
+                            metrics[f"{name}_{agg}_{tta}"] = round(output[0].item(), 3)
+                            metrics[f"{name}_cutoff_{agg}_{tta}"] = round(output[1].item(), 3)
+                        else:
+                            metrics[f"{name}_{agg}_{tta}"] = round(output.item(), 3)
+                      
+                        
+                best_tta = max(["tta", "no-tta"], key=lambda tta: metrics[f"SensAtSpec_{agg}_{tta}"])
+                best_score = metrics[f"SensAtSpec_{agg}_{best_tta}"]
+                best_threshold = metrics[f"SensAtSpec_cutoff_{agg}_{best_tta}"]
+                # Keep predictions if this is the best epoch so far
+                if best_score > self.best_score[str(cutoff)]['score']:
+                    self.best_score[str(cutoff)] = {'score': best_score,
+                                                    'threshold': best_threshold,
+                                                    'epoch': self.epoch,
+                                                    'agg': agg,
+                                                    'tta': best_tta}
+    
+                    self.best_predictions[str(cutoff)] = (patient_dfs[best_tta].select(["CPR_CHILD",
+                                                                                        agg,
+                                                                                        "label",
+                                                                                        "treatment"])
+                                                          .rename({agg: "preds"}).with_columns([pl.lit(agg).alias("agg"),
+                                                                                                pl.lit(best_tta).alias('tta'),
+                                                                                                pl.lit(best_threshold).alias("threshold")]))
+                    self.best_df[str(cutoff)] = df
+           
+                row = {'epoch': self.epoch,
+                       'train_loss': round(sum(train_loss.values()), 4), 
+                       'train_preterm_loss': round(train_loss['preterm'], 4),
+                       'val_loss': round(sum(val_loss.values()), 4),
+                       'val_preterm_loss': round(val_loss['preterm'], 4),
+                       **dict(sorted(metrics.items()))}
 
-        path = Path(self.save_path) / 'metrics.csv'
+                metrics_df = pl.DataFrame([row])
+
+                path = self.metrics_path / f"metrics_{cutoff}_{agg}_fold_{self.fold}.csv"
+            
+                if path.exists():
+                    existing = pl.read_csv(path)
+                    metrics_df = pl.concat([existing, metrics_df], how="vertical")
+
+                metrics_df.write_csv(path)
+
+            
+                self.plot_metrics(metrics_df, cutoff, agg)
         
-        if path.exists():
-            existing = pl.read_csv(path)
-            pl.concat([existing, metrics_df], how="vertical").write_csv(path)
-        else:
-            metrics_df.write_csv(path)
-        
-        self.plot_metrics()
         self.dfs = {str(c): [] for c in self.cutoffs}
 
+    def plot_metrics(self, metrics_df, cutoff, agg):
+        metric_cols = [col for col in metrics_df.columns if col not in ["epoch",
+                                                                        "train_loss",
+                                                                        "train_preterm_loss",
+                                                                        "val_loss",
+                                                                        "val_preterm_loss"]
+                       and "_cutoff_" not in col and (col.endswith(f"_{agg}_tta") or col.endswith(f"_{agg}_no-tta"))]
+    
+        fig, ax = plt.subplots(figsize=(12, 6))
+    
+        ax.plot(metrics_df["epoch"], metrics_df["train_loss"],
+                label="Train Total Loss", color="tab:blue")
+        ax.plot(metrics_df["epoch"], metrics_df["train_preterm_loss"],
+                label="Train Preterm Loss", color="tab:blue", linestyle="--")
+    
+        ax.plot(metrics_df["epoch"], metrics_df["val_loss"],
+                label="Validation Total Loss", color="tab:orange")
+        ax.plot(metrics_df["epoch"], metrics_df["val_preterm_loss"],
+                label="Validation Preterm Loss", color="tab:orange", linestyle="--")
+    
+        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"][2:]
+    
+        for i, col in enumerate(metric_cols):
+            color = colors[i // 2 % len(colors)]
+            is_tta = col.endswith("_tta") and not col.endswith("_no-tta")
+            linestyle = "--" if is_tta else "-"
+            label = col.removesuffix(f"_{agg}_tta").removesuffix(f"_{agg}_no-tta")
+            if is_tta:
+                label += " (TTA)"
         
-def get_metrics(cfg, t=0.5):
-    metrics = {'Recall': tm.Recall(task='binary', threshold=t).to(cfg.device.type),
-               'Specificity': tm.Specificity(task='binary', threshold=t).to(cfg.device.type),
-               'SensAtSpec': tm.SensitivityAtSpecificity(min_specificity=0.85, task='binary').to(cfg.device.type)}
+            ax.plot(metrics_df["epoch"], metrics_df[col], label=label, color=color, linestyle=linestyle)
     
-    return metrics
+        ax.set_title(f"Fold {self.fold} - GA {cutoff} - {agg.capitalize()}")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Value")
+        ax.set_ylim(0, 1.05)
+        ax.legend(loc="best", fontsize=8)
+        plt.tight_layout()
+        fig.savefig(self.plot_path / f"Fold {self.fold} - GA {cutoff} - {agg.capitalize()}.png", dpi=300)
+        plt.close(fig)
+         
+        
+    def get_best_epoch(self):
+        return {str(cutoff): str(self.best_score[str(cutoff)]['epoch']).zfill(3) for cutoff in self.cutoffs}
+
+
+    def log_fold(self, cutoff):
+        df = pl.concat(self.dfs[str(cutoff)])
+        best = self.best_score[str(cutoff)]
+        if best['tta'] == 'no-tta':
+            df = df.filter(pl.col("img_path").str.ends_with("_1"))
+        
+        agg_fn = self.agg_fns[best['agg']]
+
+        patient_df = (df.group_by("CPR_CHILD").agg([agg_fn.alias("preds"),
+                                                   pl.col("label").first().alias("label"),
+                                                   pl.col("treatment").first().alias("treatment")])
+                      .with_columns([pl.lit(self.fold).alias("fold"),
+                                     pl.lit(best['agg']).alias('agg'),
+                                     pl.lit(best['tta']).alias('tta'),
+                                     pl.lit(best["threshold"]).alias('threshold'),
+                                     (pl.col("preds") >= best["threshold"])
+                                     .cast(pl.Int8).alias("preds_binary"),
+                                     (pl.when(pl.col("preds") < best["threshold"])
+                                     .then(0.5 * pl.col("preds") / best["threshold"])
+                                     .otherwise(0.5 + 0.5 * (pl.col("preds") - best["threshold"]) / (1 - best["threshold"]))
+                                     .alias("preds_normalized"))]))
+                                     
+        self.test_preds[str(cutoff)].append(patient_df)
+        pl.concat(self.test_preds[str(cutoff)]).write_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
     
+    def reset(self):
+        for cutoff in self.cutoffs:
+            self.best_predictions[str(cutoff)].write_parquet(self.pred_path / f"validation/predictions_{cutoff}_fold_{self.fold}.parquet")        
+            self.best_df[str(cutoff)].write_parquet(self.pred_path / f"validation/image_preds_{cutoff}_fold_{self.fold}.parquet")
+        self.best_score = {str(c): {'score': -float("inf"),
+                                    'threshold': None,
+                                    'epoch': -1,
+                                    'agg': None,
+                                    'tta': None} for c in self.cutoffs}
+
+        self.dfs = {str(c): [] for c in self.cutoffs}
+        self.best_predictions = {str(c): None for c in self.cutoffs}
+        self.epoch = 0
+        self.fold += 1
+        self.best_df = {}
+    
+    def get_val_preds_and_labels(self, cutoff, population):
+        temp_dfs = []
+
+        for path in (self.pred_path / "validation").glob(f"predictions_{cutoff}*"):
+            temp_df = pl.read_parquet(path)
+            temp_df = temp_df.with_columns((pl.col("preds") - pl.col("threshold") + 0.50).alias("preds"))
+            if population == 'Non-treated':
+                temp_df = temp_df.filter(~pl.col("treatment"))
+            temp_dfs.append(temp_df)
+        df = pl.concat(temp_dfs)
+        preds = torch.tensor(df["preds"].to_numpy(), dtype=torch.float32).to(self.device)
+        labels = torch.tensor(df["label"].to_numpy(),dtype=torch.int32).to(self.device)
+        preds = preds.clamp(0, 1)
+        return preds, labels
+        
+    def log_model(self):
+        for cutoff in self.cutoffs:
+            if len(self.test_preds[str(cutoff)]) != 0:
+                df = pl.concat(self.test_preds[str(cutoff)])
+                df.write_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
+            else:
+                df = pl.read_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
+            report = []
+            for pop, pop_df in [("All Births", df), ("Non-treated", df.filter(~pl.col("treatment")))]:
+                #Get fold variability
+                for fold in range(df['fold'].max()):
+                    fold_df = pop_df.filter(pl.col("fold") == fold)
+                    
+                    preds = torch.tensor(fold_df["preds"].to_numpy(), dtype=torch.float32).to(self.device)
+                    labels = torch.tensor(fold_df["label"].to_numpy(),dtype=torch.int32).to(self.device)
+    
+                    metrics = self.get_metrics()
+                    
+                    if fold == 0:
+                        results = {name: [] for name in metrics.keys()}
+                        results['SensAtSpec_cutoff'] = []
+                    
+                    for name, metric in metrics.items():
+                        output = metric(preds, labels)
+        
+                        if isinstance(output, tuple):
+                            results[name].append(output[0].item())
+                            results[f"{name}_cutoff"].append(output[1].item())
+                        else:
+                            results[name].append(output.item())
+        
+                fig, ax = plt.subplots(figsize=(max(10, len(results) * 1.2), 6))
+    
+                for i, (name, values) in enumerate(results.items()):
+                    values = np.asarray(values, dtype=float)
+    
+                    if len(values) == 0:
+                        continue
+                    ymin, ymax = values.min(), values.max()
+                    mean = values.mean()
+                    cap_width = 0.1
+                    color = f"C{i}"
+                    
+                    ax.vlines(i, ymin, ymax, linewidth=2, color=color)
+                    ax.hlines([ymin, ymax], i - cap_width, i + cap_width, linewidth=2, color=color)
+                    ax.scatter(i, mean, marker="o", s=60, color=color, zorder=3)
+    
+                ax.set_xticks(range(len(results)))
+                ax.set_xticklabels(results.keys(), rotation=45, ha="right")
+                ax.set_ylabel("Metric value")
+                ax.set_title(f"Fold variability — GA {cutoff}")
+                ax.grid(axis="y", alpha=0.3)
+    
+                plt.tight_layout()
+                fig.savefig(self.save_path / f"Fold variability - {pop} - GA {cutoff}.png", dpi=300)
+                plt.close(fig)
+        
+                #Get overall metrics and 95% CI
+        
+                results[pop] = {}
+                n_preterm = int(pop_df["label"].sum())
+                n_non_preterm = len(pop_df) - n_preterm
+                
+                preds = torch.tensor(pop_df["preds_normalized"].to_numpy(), dtype=torch.float32).to(self.device)
+                preds_binary = torch.tensor(pop_df["preds_binary"].to_numpy(), dtype=torch.float32).to(self.device)
+                labels = torch.tensor(pop_df["label"].to_numpy(), dtype=torch.int32).to(self.device)
+                
+                metrics = self.get_metrics()
+                rng = np.random.default_rng()
+                val_preds, val_labels = self.get_val_preds_and_labels(cutoff, pop)
+
+                for name, metric in metrics.items():
+                    results[pop][name] = {}
+                    # Use binary predictions for sensitivity and specificity
+                    is_binary_metric = name in ["Sensitivity", "Specificity"]
+    
+                    metric_preds = preds_binary if is_binary_metric else preds
+                    metric.reset()
+                    output = metric(metric_preds, labels)
+
+                    metric.reset()
+                    val_output = metric(val_preds, val_labels)
+
+                    if isinstance(output, tuple):
+                        results[pop][name]['mean'] = output[0].item()
+                        results[pop][name]['val'] = val_output[0].item()
+                    else:
+                        results[pop][name]['mean'] = output.item()
+                        results[pop][name]['val'] = val_output.item()
+                    # Bootstrap 95% CI
+                    boot_values = []
+                
+                    for _ in range(self.n_bootstrap):
+                        idx = rng.integers(0, len(pop_df), size=len(pop_df))
+                        boot_labels = labels[idx]
+        
+                        if torch.unique(boot_labels).numel() < 2:
+                            continue
+                
+                        metric.reset()
+                        boot_output = metric(metric_preds[idx], boot_labels)
+                
+                        value = boot_output[0] if isinstance(boot_output, tuple) else boot_output
+                        boot_values.append(value.item())
+                
+    
+                    results[pop][name]['lower'] = np.percentile(boot_values, 2.5)
+                    results[pop][name]['upper'] = np.percentile(boot_values, 97.5)
+                
+                                
+                agg_summary = (df.select(["fold", "agg", "tta"]).unique().group_by(["agg", "tta"])
+                               .agg(pl.len().alias("n_folds")).sort(["agg", "tta"]))
+                
+                agg_summary = ", ".join(f"{row['agg']} {row['tta']} ({row['n_folds']} fold{'s' if row['n_folds'] != 1 else ''})"
+                                        for row in agg_summary.iter_rows(named=True))
+            
+                report.append(f"-- {pop} --\n"
+                              f"\tPreterm births: {n_preterm}\n"
+                              f"\tNon-preterm births: {n_non_preterm}\n"
+                              f"\tTotal births: {len(pop_df)}\n"
+                              f"\n"
+                              f"\tAggregation method: {agg_summary}\n"
+                              f"\n"
+                              f"\tMetrics:\n")
+            
+                for name, result in results[pop].items():
+                    report.append(f"\t{name}: {result['mean']:.4f} "
+                                  f"(95% CI: {result['lower']:.4f}–{result['upper']:.4f}) "
+                                  f"(Validation: {result['val']:.4f})\n")
+                report.append('\n\n')
+    
+            report = "".join(report)
+                
+            with open(self.save_path / f"GA_{cutoff}.txt", "w") as f:
+                f.write(report)
+                            
+                    
+    def get_metrics(self, t=0.5):
+        metrics = {'Sensitivity': tm.Recall(task='binary', threshold=t).to(self.device),
+                   'Specificity': tm.Specificity(task='binary', threshold=t).to(self.device),
+                   'SensAtSpec': tm.SensitivityAtSpecificity(min_specificity=0.85, task='binary').to(self.device),
+                   'AUC': tm.AUROC(task='binary').to(self.device)}
+        
+        return metrics
+    
+    def restart(self):
+        max_folds = []
+    
+        for cutoff in self.cutoffs:
+            path = self.pred_path / f"predictions_{cutoff}.parquet"
+
+            if not path.exists():
+                return
+
+            df = pl.read_parquet(path)
+            if df.is_empty():
+                return
+
+            max_folds.append(df["fold"].max())
+    
+        self.fold = min(max_folds) + 1
+        
+        

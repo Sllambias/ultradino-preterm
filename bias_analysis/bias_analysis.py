@@ -1,675 +1,785 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Jul 20 11:55:22 2026
+Created on Fri Sep 25 11:54:23 2026
 
 @author: jacob
 """
 
-import matplotlib
-matplotlib.use('Agg')
-
 import polars as pl
-from omegaconf import OmegaConf
-from omegaconf.listconfig import ListConfig
-from sklearn.metrics import auc, roc_curve
-from scipy.stats import mannwhitneyu
+from omegaconf import OmegaConf, ListConfig
 import numpy as np
-import re
 from pathlib import Path
-import logging
-from matplotlib.offsetbox import AnnotationBbox, TextArea, VPacker
+from tqdm import tqdm
+from sklearn.metrics import roc_auc_score, recall_score, confusion_matrix
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
 import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+import re
+import shutil
 
-logger = logging.getLogger(__name__)
-
-def merge_dfs(pred_df, population_parquet):
-    pred_df = pl.read_csv(pred_df)
-    population_df = pl.read_parquet(population_parquet)
-    df = pred_df.join(population_df, how='left', on='CPR_CHILD')
+def generate_insight(model_path, bias_cfg_path):
+    #Setup
+    bias_cfg = OmegaConf.load(bias_cfg_path)    
     
-    return df
-
-def prepare_columns(full_df, cfg):
-    """Bin numeric factors into categorical groups."""
+    #Load test data
+    files = sorted((Path(model_path) / "misc").glob("*.parquet"))
+    test_dfs = [pl.read_parquet(file) for file in files]
+    test_df = pl.concat(test_dfs, how="vertical")
+    test_df = test_df.with_columns(pl.len().over("CPR_CHILD").alias("num_images"))
+    #Merge deltas and convert to μm
+    test_df = test_df.with_columns(((pl.col("physical_delta_x").list.mean() +
+                                     pl.col("physical_delta_y").list.mean()) / 2 * 10000).alias("physical_delta"))
+                                   
+    #Make df per child, not per image. Avg physical_delta
+    test_df = test_df.group_by("CPR_CHILD").agg([pl.all().exclude(["CPR_CHILD", "physical_delta"]).first(),
+                                                 pl.col("physical_delta").mean()])
     
-    #Deal with missing factors    
-        # if factor not in df.columns:
-            # print(f"  [skip] '{factor}' not found in dataframe")
-            # continue
+    for var in bias_cfg.bias_variables:
+        if "range" in var:
+            min_val, max_val = var.range
+            variables = var.variable if isinstance(var.variable, (list, ListConfig)) else [var.variable]
     
-    if 'pred_max' in full_df.columns:
-        pred = 'pred_max'
-    else:
-        pred = 'pred_avg'
+            test_df = test_df.with_columns([
+                pl.when(pl.col(v).is_between(min_val, max_val))
+                .then(pl.col(v))
+                .otherwise(None)
+                .alias(v)
+                for v in variables
+            ])
+        
     
-    cols = ['CPR_CHILD', pred, 'label'] + [v.variable for v in cfg.variables]
+    #Run bias analysis
+    bias_analysis(test_df, model_path, bias_cfg, n_digits=3)
     
-    df = full_df.select(cols)
+    #Run sub group analysis
+    subgroup_analysis(test_df, model_path, bias_cfg)
+
+    #Generate histograms
+    generate_histograms(test_df, model_path, bias_cfg)
     
-    df = df.rename({pred: 'pred'})
+    #Copy images
+    sample_images(model_path)
+
+def sample_images(model_path, n_children=50):
+    pred_path = Path(model_path) / "predictions" / "validation"
+    #Get GAs
+    GAs = sorted({int(match.group(1)) for path in pred_path.glob("image_preds_*_fold_*.parquet")
+                  if (match := re.match(r"image_preds_(\d+)_fold_\d+\.parquet", path.name))})
     
-    for var_cfg in cfg.variables:
-        var = var_cfg.variable
-        if isinstance(var_cfg.bin, ListConfig):
-            cutoffs = var_cfg.bin
-            expr = (pl.when(pl.col(var) < cutoffs[0]).then(pl.lit(f"<{cutoffs[0]}")))
+    for GA in tqdm(GAs, desc="Sampling Images"):
+        save_path = Path(model_path) / f"img_sample/GA_{GA}"
+        save_path.mkdir(parents=True, exist_ok=True)
 
-            for low, high in zip(cutoffs[:-1], cutoffs[1:]):
-                expr = expr.when(pl.col(var) < high).then(pl.lit(f"{low}-{high}"))
+        img_dfs = [pl.read_parquet(path) for path in sorted(pred_path.glob(f"image_preds_{GA}*")) if path.is_file()]
+        pred_dfs = [pl.read_parquet(path) for path in sorted(pred_path.glob(f"predictions_{GA}*")) if path.is_file()]
+        
+        img_df = pl.concat(img_dfs, how="vertical")
+        pred_df = pl.concat(pred_dfs, how="vertical")
+        pred_df = pred_df.with_columns((pl.col("preds") >= pl.col("threshold")).alias("preds_binary"))
 
-            expr = expr.otherwise(pl.lit(f"{cutoffs[-1]}+"))
 
-            df = df.with_columns(expr.alias(var))
+            
+        #Sample children from each category
+        tp = pred_df.filter((pl.col("label") == True) & (pl.col("preds_binary") == True)).sample(n=n_children)["CPR_CHILD"]
+        fn = pred_df.filter((pl.col("label") == True) & (pl.col("preds_binary") == False)).sample(n=n_children)["CPR_CHILD"]
+        fp = pred_df.filter((pl.col("label") == False) & (pl.col("preds_binary") == True)).sample(n=n_children)["CPR_CHILD"]
+        tn = pred_df.filter((pl.col("label") == False) & (pl.col("preds_binary") == False)).sample(n=n_children)["CPR_CHILD"]
+            
+        #Get 
+        for df, name in [(tp, "TP"), (fn, "FN"), (fp, "FP"), (tn, "TN")]:
+            folder = save_path / name
+            #Clear out old samples
+            if folder.exists():
+                shutil.rmtree(folder)
+                folder.mkdir(parents=True, exist_ok=True)
+                
+            for child in df:
+                child_path = save_path / name / str(child)                
+                child_path.mkdir(parents=True, exist_ok=True)
 
-    return df
+                # Copy images
+                img_rows = img_df.filter(pl.col("CPR_CHILD") == child).select(["img_path", "preds"]).iter_rows(named=True)
+                for row in img_rows:
+                    img_path, ext = row["img_path"].split('.png')
+                    if ext in ['_1', '']:
+                        img_path = Path(img_path + '.png')
+                        pred = row["preds"]
 
-def compute_global_performance(df, metric='sens@spec'):
-    """Compute the global model performance on the full dataset"""
-    sub = df[['label', 'pred']].drop_nulls()
-    y_true, y_score = sub['label'], sub['pred']
-
-    if y_true.n_unique() < 2:
-        return np.nan
-
-    if metric == 'aucroc':
-        fpr, tpr, _ = roc_curve(y_true, y_score)
-        return float(auc(fpr, tpr))
-    elif metric == 'sens@spec':
-        return float(sensitivity_at_specificity_85(y_true, y_score))
-
-def sensitivity_at_specificity_85(y_true, y_score, target_specificity=0.85):
-    """Maximum sensitivity for a specificity close to 85% (tolerance grows if needed)."""
-    fpr, tpr, _ = roc_curve(y_true, y_score)
-    specificity = 1 - fpr
-    diffs = np.abs(specificity - target_specificity)
-    tol = 0.005
-    while not any(diffs <= tol):
-        tol += 0.005
-    return float(np.max(tpr[diffs <= tol]))
-
-def extract_numeric_start(group_label):
-    """Extract the first integer from a group label (e.g. '10 to 20 kg' -> 10)."""
-    s = str(group_label)
-    if s.startswith('<'):
-        match = re.search(r'(\d+)', s)
-        return (-1, int(match.group(1))) if match else (1000000, 0)
-    elif s.startswith('>'):
-        match = re.search(r'(\d+)', s)
-        return (999999, int(match.group(1))) if match else (1000000, 0)
-    match = re.match(r"(\d+)", s)
-    if match:
-        return (0, int(match.group(1)))
-    return (1000000, 0)
-
-def bootstrap_sensitivities(df, n_iterations=40):
-    sensitivities = []
-    for _ in range(n_iterations):
-        sample = df.sample(n=df.height, with_replacement=True)
-        y_true = sample['label']
-        y_score = sample['pred']
-        if len(y_true.unique()) > 1:
-            sensitivities.append(sensitivity_at_specificity_85(y_true, y_score))
-    return sensitivities
-
-def bootstrap_aucs(df, label_col, pred_col, n_iterations=40):
-    """Bootstrap AUC-ROC values."""
-    aucs = []
-    for _ in range(n_iterations):
-        sample = df.sample(n=len(df), replace=True)
-        y_true = sample['label']
-        y_score = sample['pred']
-        if len(y_true.unique()) > 1:
-            fpr, tpr, _ = roc_curve(y_true, y_score)
-            aucs.append(auc(fpr, tpr))
-    return aucs
-
-def compute_all_bias_metrics_classification(df, cfg):
-    """Run compute_bias_per_factor_classification for all selected factors."""
-    results = {}
+                        new_name = f"{pred:.6f}.png"
+                        shutil.copy2(img_path, child_path / new_name)
+                        
+                 
+def generate_histograms(variable_df, model_path, bias_cfg, CL_threshold=25):
     
-    variables = [v.variable for v in cfg.variables]
-    
-    for variable in variables:
-        result = compute_bias_per_variable_classification(df, variable, min_group_size=cfg.config.min_group_size, metric=cfg.metric)
-        if result:
-            results[variable] = result
-            logger.info(f"[ok] {variable}: {len(result['subgroups'])} subgroups, "
-                        f"{cfg.metric} {result['worst_value']:.2f} - {result['best_value']:.2f}")
-        else:
-            logger.info(f"[skip] {variable}: not enough valid subgroups")
-    return results
+    CL = pl.col(bias_cfg.CL)
 
+    groups = [("All patients", pl.lit(True)),
+              ("Preterm", pl.col("label") == 1),
+              (f"CL < {CL_threshold}", CL < CL_threshold),
+              (f"Predicted positive, CL >= {CL_threshold}",
+               (pl.col("preds_binary") == 1) & (CL >= CL_threshold)),
+              (f"Preterm, CL >= {CL_threshold}, predicted negative",
+               (pl.col("label") == 1) & (CL >= CL_threshold) & (pl.col("preds_binary") == 0))]
 
-
-def compute_bias_per_variable_classification(df, variable, min_group_size=100, metric='sens@spec'):
-    """Compute classification metric + bootstrap for each subgroup of a factor."""
-    df_temp = df.filter(pl.col(variable).is_not_null())
-    group_counts = df_temp.group_by(variable).len()
-    valid = (group_counts.filter(pl.col("len") >= min_group_size).select(variable).to_series())
-
-    if len(valid) < 2:
-        return None
-    
-    #TODO: This is kind of dirty, since we just let str cats be sorted randomly
-    sorted_groups = sorted(valid, key=extract_numeric_start)
-
-    res, boot, counts = {}, {}, {}
-    for sg in sorted_groups:
-        sub = df_temp.filter(pl.col(variable) == sg)
-        y_true = sub['label']
-        y_score = sub['pred']
-        if y_true.n_unique() < 2:
-            logger.info(f"[skip] '{sg}': constant label")
+    for path in sorted((Path(model_path) / 'predictions/').iterdir()):
+        if not path.name.endswith(".parquet"):
             continue
-        if metric == 'auc':
-            fpr, tpr, _ = roc_curve(y_true, y_score)
-            val = auc(fpr, tpr)
-            boot_vals = bootstrap_aucs(sub, n_iterations=40)
-        elif metric == 'sens@spec':
-            val = sensitivity_at_specificity_85(y_true, y_score)
-            boot_vals = bootstrap_sensitivities(sub, n_iterations=40)
 
-        if not np.isnan(val):
-            res[sg] = val
-            boot[sg] = boot_vals
-            counts[sg] = len(sub)
+        GA = path.stem.split("_")[-1]
+        predictions = pl.read_parquet(path)
 
-    if len(res) < 2:
-        return None
+        df = predictions.join(variable_df, how='left', on='CPR_CHILD')
+        df = df.filter(pl.col(bias_cfg.CL).is_not_null())
 
-    valid_sorted = [sg for sg in sorted_groups if sg in metric]
-    best = max(res, key=res.get)
-    worst = min(res, key=res.get)
+        save_path = Path(model_path) / f"histograms/GA_{GA}/"
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        populations = [("All Births", df), ("Non-treated", df.filter(pl.col("treatment") == False))]
+        for var in tqdm(bias_cfg.bias_variables, desc="Generating Histograms"):
+            for population_name, population_df in populations:
+                #Handle multi-var inputs                    
+                if isinstance(var.variable, (list, ListConfig)):
+                    variable = var.variable[0]
+                    population_df = population_df.with_columns(pl.coalesce([pl.col(v) for v in var.variable]).alias(variable))
+                else:
+                    variable = var.variable
+                    
+                if var.type in ['interval', 'centiles', 'year_interval']:        
+                    if var.type == 'year_interval':
+                        population_df = population_df.with_columns(pl.col(variable).dt.year().alias(variable))
+        
+                    # Extract distributions
+                    distributions = {}
+                    for name, condition in groups:
+                        values = (population_df.filter(condition).select(pl.col(variable).drop_nulls())
+                                  .to_series().to_numpy())
+        
+                        values = values[np.isfinite(values)]
+        
+                        if len(values) > 1:
+                            distributions[name] = values
+        
+                    if not distributions:
+                        continue
+        
+                    # Common x-axis
+                    all_values = np.concatenate(list(distributions.values()))
+                    x = np.linspace(all_values.min(), all_values.max(), 400)
+        
+                    # Plot KDEs
+                    fig, ax = plt.subplots(figsize=(9, 5))
+        
+                    for name, values in distributions.items():
+                        try:
+                            kde = gaussian_kde(values)
+                            ax.plot(x, kde(x), label=f"{name} (n={len(values):,})")
+                        except np.linalg.LinAlgError:
+                            continue
+        
+                    #Category boundaries
+                    if var.type == 'centiles':
+                        categories = list(var.categories)
+    
+                        boundaries = population_df.select([pl.col(variable).quantile(p / 100).alias(f"p{p}") for p in categories]).row(0)
+    
+                        for boundary in boundaries:
+                            ax.axvline(boundary, color='gray', linestyle='--', alpha=0.5)
+                    else:
+                        for category in var.categories:
+                            ax.axvline(category, color='gray', linestyle='--', alpha=0.5)
+        
+                    ax.set_xlabel(variable)
+                    ax.set_ylabel("Density")
+                    ax.set_title(f"{var.name} Distribution – GA {GA}")
+                    ax.legend()                
+    
+                    fig.tight_layout()
+                    filename = f"{var.name} {population_name}".replace("/", "_")
+                    fig.savefig(save_path / f"{filename}.png", dpi=300)     
+                    plt.close(fig)    
+                
+                elif var.type == 'binary':                
+                    fig, ax = plt.subplots(figsize=(9, 5))
+                
+                    x = np.arange(2)
+                    width = 0.15
+                
+                    for i, (name, condition) in enumerate(groups):
+                        values = population_df.filter(condition)[variable].drop_nulls()
+                
+                        proportions = [(values == False).mean(), (values == True).mean()]
+                
+                        ax.bar(x + (i - 2) * width, proportions, width, label=f"{name} (n={len(values):,})")
+                
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(var.categories)
+                    ax.set_ylabel("Proportion")
+                    ax.set_xlabel(var.name)
+                    ax.set_title(f"{var.name} Distribution – GA {GA}")
+                    ax.set_ylim(0, 1)
+                    ax.legend()
+                    ax.grid(axis='y', alpha=0.2)
+                
+                    fig.tight_layout()
+                    filename = f"{var.name} {population_name}".replace("/", "_")
+                    fig.savefig(save_path / f"{filename}.png", dpi=300)     
+                    plt.close(fig)
+                
+                elif var.type == 'frequency_threshold':
+                
+                    # Find most frequent categories in the full population
+                    counts = population_df[variable].drop_nulls().value_counts()
+                
+                    categories = (counts.with_columns((pl.col("count") / pl.col("count").sum() * 100).alias("percent"))
+                                  .filter(pl.col("percent") >= var.cutoff_percent)
+                                  .sort("count", descending=True)
+                                  .head(var.max_categories)[variable].to_list())
+                
+                    # Add all remaining categories to Other
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                
+                    x = np.arange(len(categories) + 1)
+                    width = 0.15
+                
+                    for i, (name, condition) in enumerate(groups):
+                        values = population_df.filter(condition)[variable].drop_nulls()
+                
+                        proportions = [(values == category).sum() / len(values) for category in categories]
+                        other = (~values.is_in(categories)).sum() / len(values)
+                        proportions.append(other)
+                
+                        ax.bar(x + (i - 2) * width, proportions, width, label=f"{name} (n={len(values):,})")
+                
+                    ax.set_xticks(x)
+                    ax.set_xticklabels([str(c) for c in categories] + ["Other"], rotation=45, ha='right')
+                    ax.set_ylabel("Proportion")
+                    ax.set_xlabel(var.name)
+                    ax.set_title(f"{var.name} Distribution – GA {GA}")
+                    ax.set_ylim(0, 1)
+                    ax.legend()
+                    ax.grid(axis='y', alpha=0.2)
+                
+                    fig.tight_layout()
+                    filename = f"{var.name} {population_name}".replace("/", "_")
+                    fig.savefig(save_path / f"{filename}.png", dpi=300)                   
+                    plt.close(fig)
+                    
+                    
+def bias_analysis(variable_df, model_path, bias_cfg, n_digits=3):    
+    bias_wb = Workbook()
+    bias_wb.remove(bias_wb.active)
+    
+    significance_pairs = [("P (sens)", "Sensitivity"), ("P (spec)", "Specificity")]
+    
+    for path in sorted((Path(model_path) / 'predictions/').iterdir()):
+        if path.name.endswith(".parquet"):
+            GA = path.stem.split("_")[-1]
+            predictions = pl.read_parquet(path)
+            
+            df = predictions.join(variable_df, how='left', on='CPR_CHILD')
+            results = {}
+            orders = {}
+            for var in tqdm(bias_cfg.bias_variables, desc="Running Bias Analysis"):
+                if isinstance(var.variable, (list, ListConfig)):
+                    df = df.with_columns(pl.coalesce([pl.col(var.variable[0]), pl.col(var.variable[1])])
+                                         .alias(var.variable[0]))
+                    var.variable = var.variable[0]
 
-    return {'subgroups': valid_sorted,
-            'metric_per_subgroup': metric,
-            'bootstrap': boot,
-            'counts': counts,
-            'best_subgroup': best,
-            'worst_subgroup': worst,
-            'best_value': res[best],
-            'worst_value': res[worst]}
+                results[var.name] = {}
+                
+                for pop, pop_df in [("All Births", df), ("Non-treated", df.filter(~pl.col("treatment")))]:
+                                        
+                    results[var.name][pop] = {}
+                    
+                    var_df = pop_df.select(['CPR_CHILD', 'preds', 'preds_binary', 'preds_normalized',
+                                            'label', 'threshold', var.variable])
+                    var_df = var_df.filter(pl.col(var.variable).is_not_null())
+
+                    var_df, order = categorize_variable(var_df, var)
+                    orders[var.name] = ['Overall'] + order
+
+                    report, overall_metrics = get_bias_metrics(var_df)     
+
+                    results[var.name][pop]['Overall'] = report
+                    
+                    for subgroup_df in var_df.partition_by(var.variable, maintain_order=True):
+                        subgroup = subgroup_df[var.variable][0]
+                        report, _ = get_bias_metrics(subgroup_df, overall_metrics)
+                        p_sens = permutation_test(subgroup_df, pop_df, recall_score, preds_column='preds_binary', n_digits=n_digits)
+                        p_spec = permutation_test(subgroup_df, pop_df, specificity, preds_column='preds_binary', n_digits=n_digits)
+                        report['P (sens)'] = p_sens
+                        report['P (spec)'] = p_spec
+                        results[var.name][pop][subgroup] = report
+
+            bias_wb = report_to_excel(bias_wb, results, orders, f"GA {GA}", 'Category', significance_pairs=significance_pairs)
+    bias_wb.save(Path(model_path) / "bias_analysis.xlsx")    
+
+def get_bias_metrics(df, overall_metrics=None):
+    n = df.height
+    n_preterm = df['label'].sum()
+    
+    labels = df['label'].to_numpy()
+    preds = df['preds_normalized'].to_numpy()
+    preds_binary = df['preds_binary'].to_numpy()
+    
+    AUC = calculate_metrics(roc_auc_score, labels, preds)['value']
+    sens = calculate_metrics(recall_score, labels, preds_binary)['value']
+    spec = calculate_metrics(specificity, labels, preds_binary)['value']
 
 
-def _radar_polygon_area(vals, angles, ymin=0.0):
-    """
-    Compute the area of a closed radar polygon using the shoelace formula.
+    report = {'N': f"{n}",
+               'Preterm': f"{n_preterm}",
+               'AUC': f"{AUC:.3f}",
+               'Sensitivity': f"{100*sens:.1f}%",
+               'Missed / 100k': '-',
+               'P (sens)': '-',
+               'Specificity': f"{100*spec:.1f}%",
+               'Extra FP / 100k': '-',
+               'P (spec)': '-'}
 
-    The baseline (ymin) is subtracted so that only the visible portion of the
-    polygon contributes to the area.  The last point in vals/angles must repeat
-    the first (closed loop, as produced by angles + [angles[0]]).
+    if overall_metrics is None:
+    
+        metrics = {'n': n,
+                   'preterm': n_preterm,
+                   'auc': AUC,
+                   'sens': sens,
+                   'spec': spec}
 
-    Parameters
-    ----------
-    vals   : array-like  – radial values (e.g. best_plot or worst_plot)
-    angles : array-like  – corresponding angles in radians (closed loop)
-    ymin   : float       – radar baseline (e.g. 0.0 for regression, 0.5 for AUC)
+        return report, metrics
 
-    Returns
-    -------
-    float : polygon area ≥ 0
-    """
-    r = np.maximum(np.array(vals, dtype=float) - ymin, 0.0)
-    theta = np.array(angles, dtype=float)
-    x = r * np.cos(theta)
-    y = r * np.sin(theta)
-    return 0.5 * np.abs(np.dot(x[:-1], y[1:]) - np.dot(y[:-1], x[1:]))
+    else:
+        # Differences relative to Overall
+        report['N'] = f"{n} ({100 * n / overall_metrics['n']:.1f}%)"
+        report['Preterm'] = f"{n_preterm} ({100 * n_preterm / overall_metrics['preterm']:.1f}%)"
+        report['AUC'] += f" ({AUC - overall_metrics['auc']:+.3f})"
+        report['Sensitivity'] += f" ({100 * (sens - overall_metrics['sens']):+.1f}%)"
+        report['Specificity'] += f" ({100 * (spec - overall_metrics['spec']):+.1f}%)"
+    
+        subgroup_fraction = n / overall_metrics['n']
+        preterm_prevalence = n_preterm / n if n else 0
 
-def compute_mean_abs_gap(bias_results):
-    """
-    Compute the mean absolute gap between the worst and best subgroup metric,
-    averaged over all factors in bias_results.
+        missed = 100_000 * subgroup_fraction * preterm_prevalence * (overall_metrics['sens'] - sens)
 
-    For regression : gap = worst_value - best_value  (higher MRE is worse)
-    For classification : gap = best_value - worst_value (higher sensitivity is better)
-    In both cases the gap is abs(best_value - worst_value) >= 0.
+        extra_fp = 100_000 * subgroup_fraction * (1 - preterm_prevalence) * (overall_metrics['spec'] - spec)
 
-    Returns
-    -------
-    float : mean |worst_value - best_value| across all factors
-    """
-    if not bias_results:
-        return np.nan
-    gaps = [abs(res['worst_value'] - res['best_value']) for res in bias_results.values()]
-    return float(np.mean(gaps))
+        report['Missed / 100k'] = f"{missed:+.1f}"
+        report['Extra FP / 100k'] = f"{extra_fp:+.1f}"
+        
+        return report, None
 
-def compute_mean_rel_gap(bias_results):
-    """
-    Compute the mean relative gap between the worst and best subgroup metric,
-    averaged over all factors in bias_results.
+def calculate_metrics(metric, labels, preds, with_CI=False, n_bootstrap=10000, n_digits=3):
+    
+    results = {"value": round(metric(labels, preds), n_digits)}
+    
+    if with_CI:
+        rng = np.random.default_rng()
+        n = len(labels)
+        bootstrap_scores = []
 
-    rel_gap = |max - min| / max * 100  (%)
-    where max = max(best_value, worst_value) for each factor.
+        for _ in range(n_bootstrap):
+            idx = rng.choice(n, size=n, replace=True)
 
-    Returns
-    -------
-    float : mean relative gap (%) across all factors
-    """
-    if not bias_results:
-        return np.nan
-    rel_gaps = []
-    for res in bias_results.values():
-        denom = max(abs(res['best_value']), abs(res['worst_value']))
-        if denom > 0:
-            rel_gaps.append(abs(res['worst_value'] - res['best_value']) / denom * 100)
-    return float(np.mean(rel_gaps)) if rel_gaps else np.nan
+            boot_labels = labels[idx]
+            boot_preds = preds[idx]
 
-def _significance_test(values_a, values_b):
-    """
-    Return (p_value, stars) for a two-sample comparison.
-
-    Regression  : Welch's t-test on raw MRE arrays (values_a / values_b are
-                  1-D float arrays).
-    Classification : Mann-Whitney U on bootstrap distributions (values_a /
-                  values_b are 1-D float arrays of bootstrap metric values).
-
-    Stars: '**' p<0.001 | '*' p<0.05 | '' otherwise.
-    """
-    if len(values_a) < 5 or len(values_b) < 5:
-        return 1.0, ''
-    try:
-        _, p = mannwhitneyu(values_a, values_b, alternative='two-sided')
-        stars = '**' if p < 0.001 else ('*' if p < 0.05 else '')
-        return float(p), stars
-    except Exception:
-        return 1.0, ''
-
-def _metric_label(metric='sensitivity'):
-    if metric == 'auc':
-        return 'AUC-ROC'
-    elif metric == 'sens@spec':
-        return 'Sens @ 85% Spec'
-
-def _radar_ylim(bias_results=None, metric='sensitivity', ylim=None):
-    """
-    Return (ymin, ymax, yticks, yticklabels) for radar polar axes.
-
-    Priority: explicit ylim > cls_metric-based defaults > data-driven (regression).
-    """
-    if ylim is not None:
-        ymin, ymax = ylim
-        step = 0.1 if (ymax - ymin) <= 0.6 else 0.2
-        ticks = [round(t, 2) for t in np.arange(ymin + step, ymax, step)]
-        return ymin, ymax, ticks, [f'{t:.1f}' for t in ticks]
-
-    if metric == 'auc':
-        ticks = [0.5, 0.6, 0.7, 0.8, 0.9]
-        return 0.5, 1.0, ticks, ['0.5', '0.6', '0.7', '0.8', '0.9']
-    elif metric == 'sens@spec':
-        ticks = [0.2, 0.4, 0.6, 0.8]
-        return 0.0, 1.0, ticks, ['0.2', '0.4', '0.6', '0.8']
-
-def plot_radar_main(bias_results, global_perfomance, cfg):
-    """
-    Radar showing best/worst group for each factor.
-    Works for both regression (MRE) and classification (sensitivity / AUC-ROC).
-
-    Parameters
-    ----------
-    ylim : (ymin, ymax) | None
-        Override the y-axis range. Use compute_shared_scale() to align multiple
-        figures generated for different models on the same scale.
-    cls_metric : str
-        'sensitivity' or 'aucroc'  (ignored for regression).
-    show_factor_name : bool
-        If True (default), display the factor name in bold above the subgroup
-        labels.  Set to False to only show the subgroup names (cleaner for
-        publication figures with many factors).
-    show_metric_value : bool
-        If True, append the numeric metric value after each subgroup label
-        (e.g. '↑Caucasian 5.23%' / '↓Asian 8.10%').  Default False.
-
-    Quadrant support
-    ----------------
-    Set config['quadrants'] to a list of dicts to group factors into colored sectors:
-
-        config['quadrants'] = [
-            {'label': 'Mother',  'vars': ['Ethnicity', 'BMI', 'Mother Age'], 'color': '#d0e1f2'},
-            {'label': 'Baby',    'vars': ['GA', 'Birth Weight', 'CL'],       'color': '#e6d6f0'},
-            {'label': 'Imaging', 'vars': ['Device Name', 'Pixel Spacing'],   'color': '#fbe2e5'},
-            {'label': 'Context', 'vars': ['Birth Year', 'Birth Place'],      'color': '#d9f2e6'},
-        ]
-
-    Each quadrant spans 360/n_quadrants degrees. Factors absent from bias_results are
-    skipped. Factors not listed in any quadrant are appended after the last one.
-    Without config['quadrants'], factors are spread evenly (previous behaviour).
-    """
-    if not bias_results:
-        logger.warning("Warning: no bias results to plot")
-        return None
-
-    quadrant_def = None
-
-    #TODO: Implement this - needs to come from CFG
-    if quadrant_def:
-        n_quads      = len(quadrant_def)
-        deg_per_quad = 360.0 / n_quads
-        variables      = []
-        angle_map    = {}
-
-        for q_idx, q in enumerate(quadrant_def):
-            start_deg  = q_idx * deg_per_quad
-            end_deg    = start_deg + deg_per_quad
-            vars_in_q  = [v for v in q['vars'] if v in bias_results]
-            if not vars_in_q:
+            # Skip samples where the metric cannot be calculated
+            try:
+                score = metric(boot_labels, boot_preds)
+                if np.isfinite(score):
+                    bootstrap_scores.append(score)
+            except (ValueError, ZeroDivisionError):
                 continue
-            # Distribute inside (start, end) exclusive of boundary ticks
-            theta_range = np.linspace(start_deg, end_deg, len(vars_in_q) + 2)[1:-1]
-            for n_var, (var, angle_deg) in enumerate(zip(vars_in_q, theta_range)):
-                # Nudge extreme variables outward toward the quadrant edges
-                # (mirrors the adjustment in plot_bias_radar_by_quadrant)
-                if len(vars_in_q) == 2:
-                    if n_var == 0:
-                        angle_deg -= deg_per_quad / 16
-                    elif n_var == len(vars_in_q) - 1:
-                        angle_deg += deg_per_quad / 20
-                elif len(vars_in_q) == 3:
-                    if n_var == 0:
-                        angle_deg -= deg_per_quad / 20
-                    elif n_var == len(vars_in_q) - 1:
-                        angle_deg += deg_per_quad / 20
-                angle_map[var] = np.deg2rad(angle_deg)
-                variables.append(var)
 
-        # Append factors not listed in any quadrant (evenly, after the last sector)
-        unlisted = [f for f in bias_results if f not in angle_map]
-        if unlisted:
-            extra_angles = np.linspace(
-                np.deg2rad(n_quads * deg_per_quad),
-                np.deg2rad(n_quads * deg_per_quad + 360),
-                len(unlisted) + 2
-            )[1:-1]
-            for var, ang in zip(unlisted, extra_angles):
-                angle_map[var] = ang % (2 * np.pi)
-                variables.append(var)
-    else:
-        variables = list(bias_results.keys())
-        angles_eq = np.linspace(0, 2 * np.pi, len(variables), endpoint=False)
-        angle_map = {f: a for f, a in zip(variables, angles_eq)}
-
-    n = len(variables)
-    if n < 2:
-        print("Warning: fewer than 2 factors – radar cannot be drawn")
-        return None
-
-    ymin, ymax, yticks, yticklabels = _radar_ylim(bias_results=bias_results, metric=cfg.metric, ylim=cfg.plots.ylim)
-
-    angles = [angle_map[v] for v in variables]
-    best_vals = [bias_results[v]['best_value']  for v in variables]
-    worst_vals = [bias_results[v]['worst_value'] for v in variables]
-
-    # Close the loop
-    angles_plot = angles + [angles[0]]
-    best_plot   = best_vals  + [best_vals[0]]
-    worst_plot  = worst_vals + [worst_vals[0]]
-
-    # ── Bias index ────────────────────────────────────────────────────────────
-    # Areas are computed on the baseline-offset polygons (visible part only).
-    # bias_index = area_inner / area_outer  (min / max of the two polygons)
-    #   → 1.0 : no bias  (best ≈ worst)
-    #   → 0.0 : maximum bias  (inner polygon collapses)
-    # Works identically for regression (best=inner) and classification (worst=inner).
-    area_best  = _radar_polygon_area(best_plot,  angles_plot, ymin)
-    area_worst = _radar_polygon_area(worst_plot, angles_plot, ymin)
-    area_outer = max(area_best, area_worst)
-    bias_index = min(area_best, area_worst) / area_outer if area_outer > 0 else np.nan
-    bias_label = f"Bias index (inner/outer) = {bias_index:.3f}"
-
-    mean_gap = compute_mean_abs_gap(bias_results)
-    mean_rel_gap = compute_mean_rel_gap(bias_results)
-    mean_gap_label = (f"Mean |worst - best| = {mean_gap:.3f}"
-                      f"  ({mean_rel_gap:.1f}%)")
-
-    logger.info(f"  {bias_label}")
-    logger.info(f"  {mean_gap_label}")
-
-    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-    ax.set_ylim(ymin, ymax)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(yticklabels, color='gray', size=cfg.plots.font_size-8)
-
-    # ── Quadrant background shading + separator lines ─────────────────────────
-    #if quadrant_def:
-    #    for q_idx, q in enumerate(quadrant_def):
-    #        start_rad = np.deg2rad(q_idx * deg_per_quad)
-    #        end_rad   = np.deg2rad((q_idx + 1) * deg_per_quad)
-    #        ax.fill_between(np.linspace(start_rad, end_rad, 100),
-    #                        ymin, ymax, color=q['color'], alpha=0.3)
-    #    for q_idx in range(n_quads):
-    #        sep = np.deg2rad(q_idx * deg_per_quad)
-    #        ax.plot([sep, sep], [ymin, ymax * 1.05], color='black', linewidth=1.5)
-
-    ax.vlines(angles_plot, ymin, ymax, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
-
-    ax.plot(angles_plot, best_plot, color='blue', linewidth=2,
-            label='Best Group', alpha=0.6)
-    ax.plot(angles_plot, worst_plot, color='red', linewidth=2,
-            label='Worst Group', alpha=0.6)
-    ax.fill(angles_plot, best_plot, color='blue', alpha=0.1)
-    ax.fill(angles_plot, worst_plot, color='red', alpha=0.1)
-
-    ax.set_xticks([])
-    
-    for angle, variable in zip(angles, variables):
-        res = bias_results[variable]
-        best_sg  = res['best_subgroup']
-        worst_sg = res['worst_subgroup']
-
-
-        a = res['bootstrap'].get(best_sg,  np.array([]))
-        b = res['bootstrap'].get(worst_sg, np.array([]))
-        _, significance = _significance_test(a, b)
-
-        # ── Metric value suffix ───────────────────────────────────────────
-        if cfg.plots.show_metric_value:
-            bv = res['best_value']
-            wv = res['worst_value']
-            best_val_str  = f' {bv:.2f}'
-            worst_val_str = f' {wv:.2f}'
+        if bootstrap_scores:
+            ci_low, ci_high = np.percentile(bootstrap_scores, [2.5, 97.5])
         else:
-            best_val_str = worst_val_str = ''
+            ci_low, ci_high = np.nan, np.nan
 
-        label_best  = f'↑{best_sg}{significance}{best_val_str}'
-        label_worst = f'↓{worst_sg}{worst_val_str}'
+        results["ci_low"] = round(ci_low, n_digits)
+        results["ci_high"] = round(ci_high, n_digits)
 
-        children = []
-        if cfg.plots.show_factor_name:
-            children.append(TextArea(variable, textprops=dict(size=cfg.plots.font_size + 3, weight='bold')))
-        if cfg.plots.show_subgroup_names:
-            children.append(TextArea(label_best,  textprops=dict(size=cfg.plots.font_size - 2, color='blue')))
-            children.append(TextArea(label_worst, textprops=dict(size=cfg.plots.font_size - 2, color='red')))
+    return results
+            
+def specificity(y_true, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return tn / (tn + fp)           
 
-        vpack = VPacker(children=children, align="center", pad=0, sep=1)
-        ab = AnnotationBbox(vpack, (angle, ymax),
-                            frameon=False, box_alignment=(0.5, 0.5))
-        ax.add_artist(ab)
 
-    metric_lbl = _metric_label(cfg.metric)
-    if global_perfomance is not None and not np.isnan(global_perfomance):
-        fmt  = '.3f'
-        global_str = f"Global {metric_lbl}: {global_perfomance:{fmt}}"
+def categorize_variable(df, var):
+    if var.type == "interval":
+        categories = list(var.categories)
+
+        order = ([f"<{categories[0]}"]
+                 + [f"{lower}-{upper}" for lower, upper in zip(categories[:-1], categories[1:])]
+                 + [f"{categories[-1]}+"])
+
+        expr = pl.when(pl.col(var.variable) < categories[0])
+        expr = expr.then(pl.lit(order[0]))
+
+        for lower, upper, label in zip(categories[:-1], categories[1:], order[1:]):
+            expr = expr.when(pl.col(var.variable) < upper).then(pl.lit(label))
+
+        expr = expr.otherwise(pl.lit(order[-1]))
+
+        return df.with_columns(expr.alias(var.variable)), order
+    
+    elif var.type == "binary":
+        categories = list(var.categories)
+    
+        if len(categories) != 2:
+            raise ValueError(f"Binary variable '{var.variable}' must have exactly 2 categories")
+    
+        order = categories
+    
+        expr = (pl.when(pl.col(var.variable) == True)
+                .then(pl.lit(categories[0]))
+                .when(pl.col(var.variable) == False)
+                .then(pl.lit(categories[1]))
+                .otherwise(None))
+    
+        return df.with_columns(expr.alias(var.variable)), order
+    
+    elif var.type == 'centiles':
+        categories = list(var.categories)
+
+        order = ([f"0th-{categories[0]}th"] 
+                 + [f"{lower}th-{upper}th" for lower, upper in zip(categories[:-1], categories[1:])]
+                 + [f"{categories[-1]}th-100th"])
+       
+        percentile_values = df.select([pl.col(var.variable).quantile(p / 100).alias(f"p{p}") for p in categories]).row(0) 
+        expr = pl.when(pl.col(var.variable) < percentile_values[0]).then(pl.lit(order[0]))
+        
+        for value, label in zip(percentile_values[1:], order[1:]):
+            expr = expr.when(pl.col(var.variable) < value).then(pl.lit(label))
+
+        expr = expr.otherwise(pl.lit(order[-1]))
+
+        return df.with_columns(expr.alias(var.variable)), order
+    
+    elif var.type == "year_interval":
+        categories = list(var.categories)
+    
+        order = ([f"<{categories[0]}"]
+                 + [f"{lower}-{upper}" for lower, upper in zip(categories[:-1], categories[1:])]
+                 + [f"{categories[-1]}+"])
+    
+        year = pl.col(var.variable).dt.year()
+    
+        expr = pl.when(year < categories[0])
+        expr = expr.then(pl.lit(order[0]))
+    
+        for lower, upper, label in zip(categories[:-1], categories[1:], order[1:]):
+            expr = expr.when(year < upper).then(pl.lit(label))
+    
+        expr = expr.otherwise(pl.lit(order[-1]))
+        
+        return df.with_columns(expr.alias(var.variable)), order
+    
+    elif var.type == "frequency_threshold":
+        counts = df.group_by(var.variable).len(name="count")
+    
+        total = counts["count"].sum()
+    
+        categories = (counts.filter(pl.col("count") / total * 100 >= var.cutoff_percent)
+                      .sort("count", descending=True).head(var.max_categories)[var.variable].to_list())
+    
+        order = [str(category) for category in categories] + ["Other"]
+    
+        expr = (pl.when(pl.col(var.variable).is_in(categories))
+                .then(pl.col(var.variable).cast(pl.String))
+                .otherwise(pl.lit("Other")))
+
+        return df.with_columns(expr.alias(var.variable)), order
+
     else:
-        global_str = ''
+        raise Exception(f"Type {var.type} not implemented")
+
+
+def permutation_test(subgroup_df, pop_df, metric, preds_column='preds', n_permutations=10000, n_digits=3):
+    rng = np.random.default_rng()
     
+    overall_labels = pop_df['label'].to_numpy()
+    overall_preds = pop_df[preds_column].to_numpy()
     
-    if cfg.plots.show_title:
-        ax.set_title(
-            f"{metric_lbl}"
-            + (f"\n{global_str}" if global_str else '')
-            + f"\n{bias_label}"
-            + f"\n{mean_gap_label}\n",
-            fontsize=cfg.plots.font_size + 5, pad=30,
-        )
-    ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.45), fontsize=cfg.plots.font_size-8)
-    ax.grid(True, linestyle='--', linewidth=0.6, alpha=0.7)
-
-    out = Path(cfg.config.save_path)
-    out.mkdir(parents=True, exist_ok=True)
-    save_path = out / 'radar_main.png'
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    logger.info(f"  Main radar saved: {save_path}")
-    return str(save_path), bias_index, mean_gap, mean_rel_gap
-
-def plot_radar_comparison_per_factor(bias_results, variable, cfg):
-    """import polars as pl
-
-    Radar with one axis per subgroup for a given factor (single model).
-    Displays the metric value of each subgroup.
-
-    Parameters
-    ----------
-    ylim : (ymin, ymax) | None
-        Override the y-axis range for cross-model comparability.
-    cls_metric : str   'sensitivity' or 'aucroc'  (ignored for regression).
-    """
-    if variable not in bias_results:
-        return None
-
-    res = bias_results[variable]
-    subgroups = res['subgroups']
-    metric = res['metric_per_subgroup']
-    counts = res['counts']
-    n = len(subgroups)
-
-    if n < 2:
-        return None
-
-    vals = [metric[sg] for sg in subgroups]
-
-    # Scale – use _radar_ylim for consistency with other radars
-    ymin, ymax, yticks, yticklabels = _radar_ylim(bias_results={variable: res}, metric=cfg.metric, ylim=cfg.plots.ylim)
-
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-    angles_plot = angles + [angles[0]]
-    vals_plot = vals + [vals[0]]
-
-    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-    ax.set_ylim(ymin, ymax)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(yticklabels, color='gray', size=cfg.plots.font_size-8)
-    ax.vlines(angles_plot, ymin, ymax, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
-
-    ax.plot(angles_plot, vals_plot, color='teal', linewidth=2, alpha=0.6)
-    ax.fill(angles_plot, vals_plot, color='teal', alpha=0.1)
-
-    ax.set_xticks([])
-
-    best_sg = res['best_subgroup']
-
-    for angle, sg in zip(angles, subgroups):
-        val = metric[sg]
-        count = counts[sg]
-
-        # Statistical test vs best subgroup
-        stars = ''
-        if sg != best_sg:
-            a = res['bootstrap'].get(sg, np.array([]))
-            b = res['bootstrap'].get(best_sg, np.array([]))
-            _, stars = _significance_test(a, b)
-
-        txt1 = TextArea(f'{sg}{stars}', textprops=dict(size=cfg.plots.font_size, weight='bold'))
-        txt2 = TextArea(f'n={count}', textprops=dict(size=cfg.plots.font_size - 4, color='black'))
-        txt3 = TextArea(f'{val:.2f}', textprops=dict(size=cfg.plots.font_size - 4, color='teal'))
-
-        vpack = VPacker(children=[txt1, txt2, txt3], align="center", pad=0, sep=1)
-        ab = AnnotationBbox(vpack, (angle, ymax),
-                            frameon=False, box_alignment=(0.5, 0.5))
-        ax.add_artist(ab)
-
-    metric_lbl = _metric_label(cfg.metric)
-    ax.set_title(f"{variable}\n{metric_lbl}", fontsize=30, pad=60)
-    ax.grid(True, linestyle='--', linewidth=0.6, alpha=0.7)
-
-    out = Path(cfg.config.save_path)
-    name = variable.replace(' ', '_').replace('/', '_')
-    save_path = out / f'radar_{name}.png'
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    logger.info(f"  Radar {variable}: {save_path}")
-    return str(save_path)
-
-def plot_all_comparison_radars(bias_results, cfg):
-    paths = []
-    for variable in bias_results:
-        p = plot_radar_comparison_per_factor(bias_results, variable, cfg)
-        if p:
-            paths.append(p)
-    return paths
-
-def save_metrics_csv(bias_results, cfg, df=None):
-    rows = []
-
-    for variable, res in bias_results.items():
-        best_sg = res['best_subgroup']
-        for sg in res['subgroups']:
-            val = res['metric_per_subgroup'][sg]
-
-            # Statistical test vs best subgroup
-            if sg == best_sg:
-                p_value, significance = 1.0, ''
-            else:
-                a = res['bootstrap'].get(sg, np.array([]))
-                b = res['bootstrap'].get(best_sg, np.array([]))
-                p_value, _ = _significance_test(a, b)
-                significance = ('***' if p_value < 0.001 else
-                                '**' if p_value < 0.01 else
-                                '*' if p_value < 0.05 else '')
-
-            rows.append({'factor': variable,
-                         'subgroup': sg,
-                         'metric_value': val,
-                         'n_samples': res['counts'][sg],
-                         'p_value': p_value,
-                         'significance': significance,
-                         'is_best': sg == best_sg})
-
-    df_out = pl.DataFrame(rows)
-    out = Path(cfg.config.save_path)
-    csv_path = out / 'metrics.csv'
-    df_out.write_csv(csv_path)
-    logger.info(f"  Metrics CSV saved: {csv_path}")
-    return str(csv_path)
-
-def save_experiment_results(bias_results, cfg, global_perfomance, df=None):
-    paths = {}
-
-    paths['radar_main'], paths['bias_index'], paths['mean_abs_gap'], paths['mean_rel_gap'] = plot_radar_main(bias_results, global_perfomance, cfg)
-    paths['radar_comparisons'] = plot_all_comparison_radars(bias_results, cfg)
-    paths['metrics_csv'] = save_metrics_csv(bias_results, cfg, df=df)
-
-    n_files = len(paths['radar_comparisons']) + 3
-    logger.info(f"\n{'='*70}")
-    logger.info("ANALYSIS COMPLETE")
-    logger.info(f"Output directory : {cfg.config.save_path}")
-    logger.info(f"Files saved      : {n_files}")
-    logger.info(f"Mean |worst - best| (all variables) : {paths['mean_abs_gap']:.3f}  ({paths['mean_rel_gap']:.1f}%)")
-    logger.info(f"{'='*70}\n")
-    return paths
-
-def run_analysis(cfg, pred_df, population_parquet):
-    out = Path(cfg.config.save_path)
-    out.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=cfg.config.save_path + '/analysis.log', filemode='w', level=logging.INFO)
-
-    logger.info("\nSTEP 1: Preparing variables for analysis...")
-    full_df = merge_dfs(pred_df, population_parquet)
-    df = prepare_columns(full_df, cfg)
+    overall_metric = metric(overall_labels, overall_preds)
+    subgroup_metric = metric(subgroup_df['label'], subgroup_df[preds_column])
+    n_subgroup = subgroup_df.height
     
-    logger.info("\nSTEP 2: Evaluating overall performance...")
-    global_performance = compute_global_performance(df, metric=cfg.metric)
+    observed_diff = overall_metric - subgroup_metric
     
-    logger.info(f"\nSTEP 3: Computing bias metrics for {cfg.metric}...")
-    bias_results = compute_all_bias_metrics_classification(df, cfg)
-    
-    logger.info("\nSTEP 4: Generating visualizations...")
-    _ = save_experiment_results(bias_results, cfg, global_performance, df=df)
-    
-    OmegaConf.save(cfg, cfg.config.save_path)
+    diffs = []
 
+    while len(diffs) < n_permutations:
+        indices = rng.choice(pop_df.height, size=n_subgroup, replace=False)
 
+        labels = overall_labels[indices]
+
+        if len(np.unique(labels)) < 2:
+            continue
+
+        permuted_metric = metric(labels, overall_preds[indices])
+        diffs.append(overall_metric - permuted_metric)
+
+    diffs = np.array(diffs)
+    
+    p_value = round((1 + np.sum(np.abs(diffs) >= abs(observed_diff))) / (n_permutations + 1), n_digits)
+    
+    return p_value
+    
+
+def subgroup_analysis(variable_df, model_path, variable_cfg):
+        wb = Workbook()
+        wb.remove(wb.active)
+        results = {}
+        for path in sorted((Path(model_path) / 'predictions/').iterdir()):
+            if path.name.endswith(".parquet"):
+                GA = path.stem.split("_")[-1]
+
+                inclusion = ((pl.col("GA") // 7 >= int(GA))
+                             | (~pl.col("induced") & ~pl.col("c-section"))
+                             | pl.col("pprom")
+                             | (pl.col("c-section") & (pl.col("c-section_during_birth") 
+                                                       | pl.col("contractions_with_preterm_birth")) & ~pl.col("induced")))
+                
+                predictions = pl.read_parquet(path)
+                df_all = predictions.join(variable_df, how='left', on='CPR_CHILD')
+                df_all = (df_all.filter(inclusion).with_columns((pl.col("GA") // 7 < int(GA)).alias("preterm")))
+                df_CL = df_all.filter(pl.col("CL_manual").is_not_null())
+                
+                results['Model'] = {}
+                results['Cervical Length'] = {}
+                results['Model (CL Available)'] = {}
+                
+                for pop, pop_df in [('All patients', df_all), ('Non-treated', df_all.filter(~pl.col("treatment")))]:
+                    report = get_subgroup_metrics(pop_df, variable_cfg.subgroups, CL=None)
+                    results['Model'][pop] = report
+                                    
+                for pop, pop_df in [('All patients', df_CL), ('Non-treated', df_CL.filter(~pl.col("treatment")))]:
+                    report = get_subgroup_metrics(pop_df, variable_cfg.subgroups, CL="CL_manual")
+                    results['Cervical Length'][pop] = report
+                    
+                    report = get_subgroup_metrics(pop_df, variable_cfg.subgroups, CL=None)
+                    results['Model (CL Available)'][pop] = report
+                    
+                orders = {model: ["All"] + [subgroup.name for subgroup in variable_cfg.subgroups] for model in results}
+                wb = report_to_excel(wb , results, orders, f"GA {GA}", 'Subgroup')
+                wb.save(Path(model_path) / "subgroup_analysis.xlsx")    
+                
+
+def get_subgroup_metrics(df, variables, CL=None, n_bootstrap=10000):
+    results = {}
+    subgroups = [{"name": "All", "var": None, "value": None},
+                 *[dict(var) for var in variables]]
+    
+    for subgroup in tqdm(subgroups, desc="Generating Subgroup Analysis"):
+        name = subgroup["name"]
+        var = subgroup["var"]
+        value = subgroup["value"]
+    
+        if var is None:
+            subgroup_df = df
+        else:
+            subgroup_df = df.filter((pl.col("label") == 0) | (pl.col(var) == value))
+    
+        labels = subgroup_df["label"].to_numpy().astype(int)
+        
+        if CL is None:
+            preds = subgroup_df["preds_normalized"].to_numpy()
+            preds_binary = subgroup_df["preds_binary"].to_numpy()
+        else:
+            preds = -subgroup_df[CL].to_numpy()
+            preds_binary = (subgroup_df[CL] < 25).to_numpy()
+        
+        AUC = calculate_metrics(roc_auc_score, labels, preds, with_CI=True)
+        Sens = calculate_metrics(recall_score, labels, preds_binary, with_CI=True)
+        Spec = calculate_metrics(specificity, labels, preds_binary, with_CI=True)
+        
+        results[name] = {'AUC': f"{AUC['value']} ({AUC['ci_low']}-{AUC['ci_high']})",
+                         'Sensitivity': f"{Sens['value']:.1%} ({Sens['ci_low']:.1%}-{Sens['ci_high']:.1%})",
+                         'Specificity': f"{Spec['value']:.1%} ({Spec['ci_low']:.1%}-{Spec['ci_high']:.1%})",
+                         'N': f"{subgroup_df.height}",
+                         'N Preterm': f"{labels.sum()}"}
+
+    return results
+    
+   
+def report_to_excel(wb, results, orders, title, subgroup_name, 
+                    significance_level=0.05, significance_pairs=None):
+    
+    ws = wb.create_sheet(title=title)
+
+    section_font = Font(size=14, bold=True, color="FFFFFF")
+    header_font = Font(bold=True)
+
+    section_fill_gray = PatternFill("solid", fgColor="595959")
+    header_fill_gray = PatternFill("solid", fgColor="B7B7B7")
+    results_fill_gray = PatternFill("solid", fgColor="EDEDED")
+
+    section_fill_blue = PatternFill("solid", fgColor="2F5597")
+    header_fill_blue = PatternFill("solid", fgColor="8FAADC")
+    results_fill_blue = PatternFill("solid", fgColor="EAF2F8")
+
+    red_font = Font(color="9C0006", bold=True)
+    green_font = Font(color="006100", bold=True)
+
+    thin_border_gray = Side(style="thin", color="D9D9D9")
+    thick_border_gray = Side(style="medium", color="595959")
+    thin_border_blue = Side(style="thin", color="B4C7E7")
+    thick_border_blue = Side(style="medium", color="2F5597")
+
+    row = 1
+
+    for variable_index, (variable, population_data) in enumerate(results.items()):
+        populations = list(population_data.keys())
+        entries = orders[variable]
+
+        headers = [subgroup_name] + list(next(iter(next(iter(population_data.values())).values())).keys())
+
+        columns = len(headers)
+        num_populations = len(populations)
+        total_columns = columns * num_populations
+
+        if variable_index % 2 == 0:
+            section_fill = section_fill_gray
+            header_fill = header_fill_gray
+            results_fill = results_fill_gray
+            thin_side = thin_border_gray
+            thick_side = thick_border_gray
+        else:
+            section_fill = section_fill_blue
+            header_fill = header_fill_blue
+            results_fill = results_fill_blue
+            thin_side = thin_border_blue
+            thick_side = thick_border_blue
+
+        # Variable section heading
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_columns)
+
+        cell = ws.cell(row=row, column=1, value=variable)
+        cell.font = section_font
+        cell.fill = section_fill
+        cell.alignment = Alignment(horizontal="center")
+
+        row += 1
+        section_start_row = row
+
+        # Population headings
+        for i, population in enumerate(populations):
+            start_col = i * columns + 1
+            end_col = start_col + columns - 1
+
+            ws.merge_cells(start_row=row, start_column=start_col, end_row=row, end_column=end_col)
+
+            cell = ws.cell(row=row, column=start_col, value=population)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        row += 1
+
+        # Column headers for each population
+        for i in range(num_populations):
+            start_col = i * columns + 1
+
+            for j, header in enumerate(headers):
+                cell = ws.cell(row=row, column=start_col + j, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center")
+
+        row += 1
+
+        # Bonferroni correction across categories, excluding Overall
+        reference_entry = entries[0]
+        num_categories = len(entries) - 1
+        significance_threshold = (significance_level / num_categories if num_categories > 0 else significance_level)
+
+        # Write category results
+        for entry in entries:
+            for i, population in enumerate(populations):
+                start_col = i * columns + 1
+                data = population_data[population][entry]
+        
+                # Category name
+                cell = ws.cell(row=row, column=start_col, value=entry)
+                cell.fill = results_fill
+        
+                # Metric values
+                for j, header in enumerate(headers[1:], start=1):
+                    cell = ws.cell(
+                        row=row,
+                        column=start_col + j,
+                        value=data[header]
+                    )
+                    cell.fill = results_fill
+        
+                # Color significant metric differences vs. reference category
+                if entry != reference_entry:
+                    reference = population_data[population][reference_entry]
+                    if significance_pairs is not None:
+                        for p_key, metric in significance_pairs:
+                            if p_key not in data or metric not in data:
+                                continue
+            
+                            p_value = data[p_key]
+            
+                            try:
+                                p_value = float(p_value)
+                            except (ValueError, TypeError):
+                                continue
+            
+                            if p_value >= significance_threshold:
+                                continue
+            
+                            category_value = data[metric]
+                            reference_value = reference[metric]
+            
+                            try:
+                                category_value = float(
+                                    str(category_value).split()[0].rstrip("%")
+                                )
+                                reference_value = float(
+                                    str(reference_value).split()[0].rstrip("%")
+                                )
+                            except (ValueError, TypeError):
+                                continue
+            
+                            if category_value < reference_value:
+                                font = red_font
+                            elif category_value > reference_value:
+                                font = green_font
+                            else:
+                                continue
+            
+                            p_col = start_col + headers.index(p_key)
+                            ws.cell(row=row, column=p_col).font = font
+        
+            row += 1
+
+        section_end_row = row - 1
+
+        # Borders around each population's table
+        for i in range(num_populations):
+            start_col = i * columns + 1
+            end_col = start_col + columns - 1
+
+            for r in range(section_start_row, section_end_row + 1):
+                for c in range(start_col, end_col + 1):
+                    cell = ws.cell(row=r, column=c)
+
+                    cell.border = Border(left=thick_side if c == start_col else thin_side,
+                                         right=thick_side if c == end_col else thin_side,
+                                         top=thick_side if r == section_start_row else thin_side,
+                                         bottom=thick_side if r == section_end_row else thin_side)
+
+    # Adjust column widths
+    for column in ws.columns:
+        max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column)
+        column_letter = get_column_letter(column[0].column)
+        ws.column_dimensions[column_letter].width = max_length + 2
+
+    return wb
+    

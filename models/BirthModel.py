@@ -10,23 +10,20 @@ from torch import nn
 import torch
 
 class BirthModel(nn.Module):
-    def __init__(self, 
-                 vit_model, 
-                 ehr_model, 
-                 ehr_transform,
-                 img_data_transform,
-                 preterm_heads,
-                 aux_task_heads,
-                 aux_method='append'):
+    def __init__(self, model_parts, aux_method='append'):
         
         super().__init__()
-        
-        self.ehr_model = ehr_model
-        self.ehr_transform = ehr_transform
-        self.img_data_transform = img_data_transform
-        self.vit_model = vit_model
-        self.preterm_heads = preterm_heads
-        self.aux_task_heads = aux_task_heads
+
+        self.vit_model = model_parts['vit_model']        
+        self.ehr_model = model_parts['ehr_model']
+
+        self.img_data_transform = model_parts['img_data_transform']
+        self.seg_transform = model_parts['segmentation_transform']
+        self.ehr_transform = model_parts['ehr_transform']
+
+        self.preterm_heads = model_parts['preterm_heads']
+        self.aux_task_heads = model_parts['aux_task_heads']
+
         self.aux_method = aux_method
         
         if self.aux_method == 'append':
@@ -38,7 +35,8 @@ class BirthModel(nn.Module):
         else:
             raise RuntimeError(f'Unknown fusion type f"{self.aux_method}"')
             
-    def forward_append(self, img, img_data, ehr):
+    def forward_append(self, img, img_data, ehr, segmentation):
+        #Make embeddings
         embeddings = []
         if ehr.shape[1] != 0:
             ehr_embedding = self.ehr_model(ehr)        
@@ -49,23 +47,30 @@ class BirthModel(nn.Module):
             img_data_embedding = self.img_data_transform(img_data)
             embeddings.append(img_data_embedding)
         
+        if segmentation.shape[1] != 0:
+            seg_embedding = self.seg_transform(segmentation)
+            embeddings.append(seg_embedding)
+        
+        #Use embeddings
         if len(embeddings) > 0:
             embeddings = [torch.cat(embeddings, dim=1)] 
-            vision_features = self.vit_model(img, append_tokens=embeddings)
+            features = self.vit_model(img, append_tokens=embeddings) 
         else:
-            vision_features = self.vit_model(img)
+            features = self.vit_model(img) 
         
+        #Generate outputs
         outputs = {'preterm': {},
                    'aux_tasks': {}}
         
         for GA, preterm_head in self.preterm_heads.items():
-            outputs['preterm'][GA] = preterm_head(vision_features)
+            outputs['preterm'][GA] = preterm_head(features)
             
         for var, aux_task_head in self.aux_task_heads.items():
-            outputs['aux_tasks'][var] = aux_task_head(vision_features)
+            outputs['aux_tasks'][var] = aux_task_head(features)
 
-        return outputs, vision_features
+        return outputs, features
             
+    
     def freeze_model(self, model):
         for p in model.parameters():
             p.requires_grad = False
@@ -78,7 +83,7 @@ class BirthModel(nn.Module):
             p.requires_grad = True
     
         # Maximum number of blocks that are allowed to be trainable
-        if cfg.top_n_blocks == -1:
+        if cfg.training.top_n_blocks == -1:
             max_blocks = total_blocks
         else:
             max_blocks = cfg.top_n_blocks
@@ -100,6 +105,6 @@ class BirthModel(nn.Module):
             model.pos_embed.requires_grad = True
             model.register_tokens.requires_grad = True
 
-    def forward(self, img, img_data, ehr):
-        return self.forward_(img, img_data, ehr) 
+    def forward(self, img, img_data, ehr, segmentation):
+        return self.forward_(img, img_data, ehr, segmentation) 
     

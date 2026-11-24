@@ -1,0 +1,92 @@
+info:
+  name: baseline_${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
+  output_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/ #Run is saved in <output_dir>/<name>_<cutoff>/
+
+data:
+  train_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/dataset_v7/train.parquet
+  test_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/dataset_v7/test.parquet
+  batch_size: 128
+  folds: 5
+  workers: 32
+  ehr_data: [GA_at_scan]
+  img_data: [physical_delta_x, physical_delta_y]
+  segmentation: False
+  img_size: [224, 224]
+  oversample_ratio: 1 #0 = No oversampling
+  remove: []
+
+tasks:
+  preterm:
+    cutoffs: [34] #Sharp cutoff (GA < GA_cutoff)
+    loss: bce
+    cutoff_weights: 1 #List of same length as cutoffs or int applied to all cutoffs
+    distance_weight: 0.5 
+    label_smoothing_value: 2 #0 = No label smoothing
+    pos_weight: 1
+    pos_weight_multiplier: 1
+  aux_tasks:
+    - var: CL
+      loss: l2
+      weights: 0.001
+      mask_value: 0
+
+training:
+  epochs: 40
+  vit_frozen_until: 10  #VIT is frozen until this epoch
+  ehr_frozen_until: 10 #EHR is frozen until this epoch
+  #Unfreezeing strategy. Unfreeze blocks_per_step every_n_epochs until top_n_blocks are unfrozen.
+  #blocks_per_step = -1, top_n_blocks = -1 is all layers immediately
+  #blocks_per_step = -1, top_n_blocks = N is top N layers immediately
+  blocks_per_step: -1 
+  every_n_epochs: 2
+  top_n_blocks: -1
+  
+auxiliary:
+  method: append
+
+model:
+  vit:
+    weights_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/other_models/weights/oversampled_vitb16_xfold.pth #VitB
+    #weights_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/other_models/weights/oversampled_vitb16_512_xfold.pth #VitB
+    #weights_path: 'vitb16' #VitB from scratch
+    dropout: 0.2
+    drop_path_rate: 0.1 #Stochastic depth while the ViT trains (ultradino-finetune default is 0.3)
+
+  ehr:
+    weights_path:
+    dropout: 0.2
+
+  transforms:
+    vit_layer_dims: []
+    ehr_layer_dims: []
+    seg_channel_dims: []
+    dropout: 0.2
+    normalize_inputs: True #BatchNorm on ehr_data and img_data before they become tokens
+    
+  head:
+    layer_dims: []
+    dropout: 0.2
+    
+optimizer:
+  type: AdamW
+  lr1: 5e-5 #Used while ViT is frozen
+  lr2: 5e-6 #Used while ViT is unfrozen
+  lr_decay: 0.65
+  weight_decay: 1e-2
+
+  #AdamW
+  adamw_params: [0.9,0.999, 1e-8] #Beta1, Beta2, Epsilon
+  
+scheduler:
+  type: cosine_warmup
+  num_warmup_steps: 10
+  num_cycles: 1 #A multiplier for the cosine scheduler. 2 means two cycles over training
+  
+device:
+  type: cuda
+  
+unused:
+  segmentation:
+    loss: ['bce', 'dice']
+    weights: 0.25
+    foreground: [3]

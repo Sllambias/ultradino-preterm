@@ -6,127 +6,97 @@ Created on Wed Mar  4 09:41:00 2026
 @author: jacob
 """
 #%%Imports
-from omegaconf import OmegaConf
-from torch.utils.data import DataLoader
 import torch
 from tqdm import tqdm
 
-from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
-from utils.model_utils import model_from_conf, update_freezing
+from dataloader.dataloader import DataSplits
+from utils.model_utils import model_from_conf, update_freezing, set_train_mode
 from utils.optim_loader import get_optimizer, get_cosine_schedule_with_warmup
-from utils.loss_utils import get_loss, fix_labels
+from utils.loss_utils import ModelLoss
 from utils.metrics import Metrics
-from utils.utils import setup
-from utils.test_utils import test_model
+from utils.utils import setup, load_config
 
 import warnings
 warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
-
 #%%Load config and setup logger(s)
-cfg = OmegaConf.load("/projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/training_confs/append_tokens_vitb16.yaml")
+cfg = load_config("/projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/training_confs/append_tokens_vitb16.yaml")
 
 save_path = setup(cfg)
 
-#%% Setup dataloaders and models
-train_df, val_df = make_data_split(cfg, cfg.data.path, unique_column='CPR_MOTHER')
-TrainData = PreTermDataset(train_df, cfg, train=True)
-ValData = PreTermDataset(val_df, cfg, train=False)
-    
+#%% Load and train n folds of models
 
-TrainLoader = DataLoader(TrainData,
-                         cfg.data.batch_size,
-                         shuffle=True,
-                         pin_memory=True,
-                         drop_last=True,
-                         num_workers=cfg.data.workers,
-                         collate_fn=collate_fn)
+Data = DataSplits(cfg, save_path + 'misc/')
 
-ValLoader = DataLoader(ValData,
-                       cfg.data.batch_size,
-                       shuffle=False,
-                       pin_memory=False,
-                       drop_last=False,
-                       num_workers=cfg.data.workers,
-                       collate_fn=collate_fn)
-
-train_population = TrainData.population_count(cfg.tasks.preterm.cutoffs)
-val_population = ValData.population_count(cfg.tasks.preterm.cutoffs)
-
-model = model_from_conf(cfg)
-
-#%%Setup finetuning
-optimizer = get_optimizer(model, cfg)
-scheduler = get_cosine_schedule_with_warmup(optimizer, cfg)
-loss_fns = get_loss(cfg)
+Loss = ModelLoss(cfg)
 metrics = Metrics(cfg, save_path)
 
-for epoch in range(cfg.training.epochs):
-    update_freezing(model, epoch, cfg)
-
-    model.train()
-    train_loss = 0.0
-    for data in tqdm(TrainLoader):
-        optimizer.zero_grad()
-        outputs, _ = model(data['imgs'].to(cfg.device.type), 
-                           data['img_data'].to(cfg.device.type), 
-                           data['ehr_data'].to(cfg.device.type))
-        loss = 0
-        for task in cfg.tasks.keys():
-            if task == 'preterm':
-                cutoffs, loss_fn, weights = cfg.tasks[task].values()
-                for cutoff, weight in zip(cutoffs, weights):
-                    labels, mask = fix_labels(data, cutoff, cfg.data.label_smoothing_param)
-                    mask = mask.to(cfg.device.type)
-                    labels = labels.to(cfg.device.type)
-                    preterm_loss = loss_fns[loss_fn](outputs[task][str(cutoff)]['logits'], labels)*weight
-                    loss += (preterm_loss*mask).sum() / mask.sum().clamp(min=1)
-            else:
-                for aux_task in cfg.tasks[task]:
-                    var, loss_fn, weight = aux_task.values()
-                    labels = data['aux_vars'][var].to(cfg.device.type)
-                    loss += loss_fns[loss_fn](outputs[task][var]['logits'], labels)*weight
-                    
-        loss.backward()
-
-        train_loss += loss.item() / len(TrainLoader)
-        optimizer.step()
-        
-    scheduler.step()
+for fold in range(cfg.data.folds):
     
-    model.eval()
-    val_loss = 0
+    TrainLoader, ValLoader, TestLoader = Data.get_split(fold, cfg)
     
-    with torch.no_grad():
-        for data in ValLoader:
+    model = model_from_conf(cfg)
+
+    optimizer = get_optimizer(model, cfg)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, cfg)
+    Loss.reset_weight()
+
+    for epoch in range(cfg.training.epochs):
+        update_freezing(model, epoch, cfg)
+        set_train_mode(model)
+
+        for data in tqdm(TrainLoader, desc='Training'):
+            optimizer.zero_grad()
             outputs, _ = model(data['imgs'].to(cfg.device.type), 
                                data['img_data'].to(cfg.device.type), 
-                               data['ehr_data'].to(cfg.device.type))
-            metrics.update(outputs, data)
+                               data['ehr_data'].to(cfg.device.type),
+                               data['segmentation'].to(cfg.device.type))
 
-            loss = 0
+            loss = Loss(outputs, data)
+            loss.backward()
+            optimizer.step()
             
-            for task in cfg.tasks.keys():
-                if task == 'preterm':
-                    cutoffs, loss_fn, weights = cfg.tasks[task].values()
-                    for cutoff, weight in zip(cutoffs, weights):
-                        labels, mask = fix_labels(data, cutoff, cfg.data.label_smoothing_param)
-                        mask = mask.to(cfg.device.type)
-                        labels = labels.to(cfg.device.type)     
-                        preterm_loss = loss_fns[loss_fn](outputs[task][str(cutoff)]['logits'], labels)*weight
-                        loss += (preterm_loss*mask).sum() / mask.sum().clamp(min=1)
-                
-                else:
-                    for aux_task in cfg.tasks[task]:
-                        var, loss_fn, weight = aux_task.values()
-                        labels = data['aux_vars'][var].to(cfg.device.type)
-                        loss += loss_fns[loss_fn](outputs[task][var]['logits'], labels)*weight
+        train_loss = Loss.get_loss()
 
-            val_loss += loss.item() / len(ValLoader)
+        scheduler.step()
+        model.eval()
         
-    metrics.log_metrics(train_loss, val_loss)
-    torch.save(model.state_dict(), save_path + '/weights/' + str(epoch).zfill(3) + '.pth')        
+        with torch.no_grad():
+            for data in tqdm(ValLoader, desc='Validating'):
+                outputs, _ = model(data['imgs'].to(cfg.device.type), 
+                                   data['img_data'].to(cfg.device.type), 
+                                   data['ehr_data'].to(cfg.device.type),
+                                   data['segmentation'].to(cfg.device.type))
+                
+                metrics.update(outputs, data)
+                
+                loss = Loss(outputs, data)
+    
+            val_loss = Loss.get_loss()
+            
+            metrics.log_epoch(train_loss, val_loss)
 
-#%%Test model and log results
-test_model(save_path, cfg.data.test_path)
+            torch.save(model.state_dict(), f"{save_path}/weights/fold_{fold}/{str(epoch+1).zfill(3)}.pth")        
+        Loss.update_weight()
+    best_epoch = metrics.get_best_epoch()
+    
+    for cutoff in cfg.tasks.preterm.cutoffs:
+        model.load_state_dict(torch.load(f"{save_path}/weights/fold_{fold}/{best_epoch[str(cutoff)]}.pth", weights_only=True))
+        model.eval()
+        with torch.no_grad():
+            for data in tqdm(TestLoader, desc=f"Testing GA {cutoff} model"):
+                outputs, _ = model(data['imgs'].to(cfg.device.type), 
+                                   data['img_data'].to(cfg.device.type), 
+                                   data['ehr_data'].to(cfg.device.type),
+                                   data['segmentation'].to(cfg.device.type))
+                
+                metrics.update(outputs, data, cutoff)
+                
+            metrics.log_fold(cutoff)
+
+    metrics.reset()
+            
+metrics.log_model()
+
+

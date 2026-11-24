@@ -1,20 +1,24 @@
+version: "dataset_v7"
+
 paths:
   input_dir_SDS: /storage/archive/UCPH/DeepFetal/SDS/registers_pseudonymized/
+  input_dir_SP: /storage/archive/UCPH/DeepFetal/SP/tables/
   misc_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/misc/
   data_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/
-  SQL_DB: /projects/users/data/UCPH/DeepFetal/ultrasound/tables/DeepFetal_image_database_250526.sqlite
-  holdout_csv: /projects/users/data/UCPH/DeepFetal/projects/common/splits/split_V4/test_split_0.15_2026-06-08.csv
+  SQL_DB: /projects/users/data/UCPH/DeepFetal/ultrasound/tables/DeepFetal_image_database_090926.sqlite
+  holdout_csv: /projects/users/data/UCPH/DeepFetal/projects/common/splits/split_preterm_custom1/test_split_0_2026-08-24.csv
   segmentation_paths: /projects/users/data/UCPH/DeepFetal/ultrasound/segmentations/
-  incl_excl_cfg: /projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/criteria/AnyPreg.yaml
-  #incl_excl_cfg: /projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/criteria/FirstPreg.yaml
-  cervix_preds: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/misc/cervix_preds_v2.csv
+  train_cfg: /projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/criteria/AnyPreg.yaml
+  test_cfg: /projects/users/data/UCPH/DeepFetal/projects/preterm/ultradino-preterm/confs/criteria/FirstPreg.yaml
+  cervix_preds: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/misc/cervix_preds_v3.csv
+  manual_cl: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/misc/CL_2009-2025.parquet
+  bias_variables: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/misc/bias_variables.csv
+
 population: 
   population_key: CPR_CHILD
   types: #By default column types are strings. If not listed here, it will be kept as string
     GA: int
     BIRTHDAY: date
-    AGE: int
-    BMI: float
   tables: 
     - table: ${paths.input_dir_SDS}/mfr.csv
       columns:
@@ -22,50 +26,66 @@ population:
         CPR_MOTHER: CPR_MODER
         GA: GESTATIONSALDER_DAGE
         BIRTHDAY: FOEDSELSDATO
-        Hospital: SYGEHUS
         BIRTH_ID: FOEDSELSLOEBENUMMER
-        AGE: ALDER_MODER
-        BMI: BMI_MODER
     - table: ${paths.input_dir_SDS}/nyfoedte.csv
       columns:
         CPR_CHILD: CPRnummer_Barn
         CPR_MOTHER: CPRnummer_Mor
         GA: Gestationsalder
         BIRTHDAY: FoedselsDato_Barn
-        Hospital: SHAK_Sygehus 
         BIRTH_ID: DW_EK_Foedsel
-        AGE: Alder_Mor
-        BMI: BMI_Mor
+    - table: ${paths.data_dir}/tables/Population.csv
+      columns:
+        CPR_CHILD: BABY_CPR
+        CPR_MOTHER: MOR_CPR
+        GA: Gestationsalder
+        BIRTHDAY: Fødselstidspunkt
+        BIRTH_ID: BABY_Fødsel_ID
 
-t_tables:
-  adm_table: ${paths.input_dir_SDS}/t_adm.csv
-  link: K_RECNUM
-  tables:
-    - table: ${paths.input_dir_SDS}/t_sksube.csv
-      table_link: V_RECNUM
-      include: [V_CPR]
-    - table: ${paths.input_dir_SDS}/t_afl.csv
-      table_link: V_RECNUM
-      include: [V_CPR]
-    - table: ${paths.input_dir_SDS}/t_sksopr.csv
-      table_link: V_RECNUM
-      include: [V_CPR]
-    - table: ${paths.input_dir_SDS}/t_diag.csv
-      table_link: V_RECNUM
-      include: [V_CPR, D_UDDTO]
-    
+merge_tables:
+    merges:
+      - table: ${paths.input_dir_SDS}/t_sksube.csv
+        merge_table: ${paths.input_dir_SDS}/t_adm.csv
+        table_link: V_RECNUM
+        merge_table_link: K_RECNUM
+        include: [V_CPR]
+      - table: ${paths.input_dir_SDS}/t_afl.csv
+        merge_table: ${paths.input_dir_SDS}/t_adm.csv
+        table_link: V_RECNUM
+        merge_table_link: K_RECNUM
+        include: [V_CPR]
+      - table: ${paths.input_dir_SDS}/t_sksopr.csv
+        merge_table: ${paths.input_dir_SDS}/t_adm.csv
+        table_link: V_RECNUM
+        merge_table_link: K_RECNUM
+        include: [V_CPR]
+      - table: ${paths.input_dir_SDS}/t_diag.csv
+        merge_table: ${paths.input_dir_SDS}/t_adm.csv
+        table_link: V_RECNUM
+        merge_table_link: K_RECNUM
+        include: [V_CPR, D_UDDTO]
+      - table: ${paths.input_dir_SP}/Population.csv
+        merge_table: ${paths.input_dir_SP}/Barn - Fødselsinfo.csv
+        table_link: BABY_CPR
+        merge_table_link: BABY_CPR
+        include: [Gestationsalder]
+      - table: ${paths.input_dir_SP}/Mor - Fødselsresume - DEL 1.csv
+        merge_table: ${paths.input_dir_SP}/Population.csv
+        table_link: BABY_Fødsel_ID
+        merge_table_link: BABY_Fødsel_ID
+        include: [BABY_CPR]
 
 imaging:
   metadata_dicom_variables: 
     - ['manufacturer', 'str']
     - ['manufacturer_model_name', 'str']
     - ['study_date','date']
-    - ['physical_delta_x', 'float']
-    - ['physical_delta_y', 'float']
-    - ['region_location_min_x0', 'float']
-    - ['region_location_max_x1', 'float']
-    - ['region_location_min_y0', 'float']
-    - ['region_location_max_y1', 'float']
+    - ['physical_delta_x', 'list']
+    - ['physical_delta_y', 'list']
+    - ['region_location_min_x0', 'list']
+    - ['region_location_max_x1', 'list']
+    - ['region_location_min_y0', 'list']
+    - ['region_location_max_y1', 'list']
 
 #Operators work as: column_1 [operator] column_2
 merge:

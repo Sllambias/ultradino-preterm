@@ -16,7 +16,7 @@ from tqdm import tqdm
 from filelock import FileLock
 from sklearn.metrics import roc_auc_score
 
-from dataloader.dataloader import PreTermDataset, collate_fn, make_data_split
+from dataloader.dataloader import PreTermDataset, collate_fn
 from utils.model_utils import model_from_conf
 from utils.metrics import get_metrics
 from bias_analysis.bias_analysis import run_analysis
@@ -27,11 +27,19 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
 #%%Main
 
+def make_data_split(cfg, data_path, unique_column='CPR_MOTHER', training=True):
+    df = pl.read_parquet(data_path)
+    
+    for col, cond in cfg.dataset.items():
+        if cond == 'remove':
+            df = df.filter(~pl.col(col))
+    return df
+
 def test_model(folder_path, move=True, batch_size=128):
     cfg = OmegaConf.load(folder_path + 'conf.yaml')
     
     cfg.dataset.progesterone = 'ignore'
-    df = make_data_split(cfg, cfg.data.test_path, training=False)
+    df = make_data_split(cfg, "/projects/users/data/UCPH/DeepFetal/projects/preterm/Data/OnlyFirstPreg_v5/test.parquet", training=False)
     TestData = PreTermDataset(df, cfg, train=False)
     TestLoader = DataLoader(TestData,
                             batch_size,
@@ -192,7 +200,6 @@ def test_model(folder_path, move=True, batch_size=128):
         shutil.move(folder_path, folder_path.replace('Running', 'Evaluated'))
     
   
-        
 
     
     
