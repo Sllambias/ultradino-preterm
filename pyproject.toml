@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultradino-preterm"
+version = "0.1.0"
+description = "PreTerm prediction using foundation dino model"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+# ultradino-finetune is not on PyPI, install it separately
+# torch has no pin so an installed CUDA build is kept
+dependencies = [
+    "albumentations>=2.0",
+    "filelock",
+    "matplotlib",
+    "numpy",
+    "omegaconf>=2.3",
+    "openpyxl",
+    "pillow",
+    "polars>=1.0",
+    "scikit-learn",
+    "scipy",
+    "statsmodels",
+    "torch",
+    "torchmetrics>=1.0",
+    "tqdm",
+]
+
+# The folders have no __init__.py, so they are found as namespace packages
+[tool.setuptools.packages.find]
+include = ["bias_analysis*", "dataloader*", "inference*", "models*", "scripts*", "utils*"]
