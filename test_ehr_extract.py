@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from dataloader.ehr_extract_dataloader import (EHRExtractDataset, ehr_extract_collate_fn, load_population,
                                                remove_excluded)
-from utils.metrics import binary_metrics, patient_predictions
+from utils.metrics import ensemble_predictions, evaluate_predictions, patient_predictions
 from utils.model_utils import model_from_conf, mixed_precision
 
 import warnings
@@ -72,42 +72,6 @@ def predict_images(model, loader, cfg, cutoff):
     return pl.concat(frames)
 
 
-def metric_value(metric, preds, labels):
-    """One torchmetrics value; SensAtSpec also returns its threshold, which is dropped."""
-    metric.reset()
-    output = metric(preds, labels)
-    if isinstance(output, tuple):
-        output = output[0]
-    return output.item()
-
-
-def evaluate(df, n_bootstrap, rng):
-    """Metrics of one model's child predictions, as in Metrics.log_model, with bootstrap 95% CIs if n_bootstrap > 0."""
-    labels = torch.tensor(df["label"].to_numpy(), dtype=torch.int32)
-    scores = torch.tensor(df["preds_normalized"].to_numpy(), dtype=torch.float32)
-    binary = torch.tensor(df["preds_binary"].to_numpy(), dtype=torch.float32)
-
-    result = {"children": len(df), "preterm": int(df["label"].sum())}
-    for name, metric in binary_metrics("cpu").items():
-        # Sensitivity and specificity use the call at each fold's validation threshold
-        if name in ["Sensitivity", "Specificity"]:
-            preds = binary
-        else:
-            preds = scores
-        result[name] = round(metric_value(metric, preds, labels), 4)
-
-        boot_values = []
-        for _ in range(n_bootstrap):
-            idx = torch.from_numpy(rng.integers(0, len(df), size=len(df)))
-            if torch.unique(labels[idx]).numel() < 2:
-                continue
-            boot_values.append(metric_value(metric, preds[idx], labels[idx]))
-        if boot_values:
-            result[f"{name}_lower"] = round(np.percentile(boot_values, 2.5), 4)
-            result[f"{name}_upper"] = round(np.percentile(boot_values, 97.5), 4)
-    return result
-
-
 #%%Load the training run and the population
 parser = argparse.ArgumentParser()
 parser.add_argument("run_dir", help="Output folder of a train_ehr_extract.py run (holds conf.yaml, weights/, metrics/)")
@@ -133,6 +97,11 @@ if missing:
 child_subgroups = (df.group_by("CPR_BARN").agg([pl.col(column).first() for column in test_cfg.subgroups])
                    .rename({"CPR_BARN": "CPR_CHILD"}))
 
+# FILE_PATH of each loaded image, so the image predictions can be joined to other image tables (e.g. us-ocr)
+image_files = df.select(["image_path", "FILE_PATH"]).unique()
+if image_files["image_path"].n_unique() != len(image_files):
+    raise ValueError("Some image files belong to several FILE_PATHs")
+
 loader = DataLoader(EHRExtractDataset(df, cfg, train=False),
                     cfg.data.batch_size // 4,
                     shuffle=False,
@@ -146,6 +115,7 @@ rng = np.random.default_rng(test_cfg.seed)
 
 for cutoff in cfg.tasks.preterm.cutoffs:
     fold_dfs = []
+    image_dfs = []
     for fold in range(cfg.data.folds):
         best = best_checkpoint(run_dir, cutoff, fold)
         print(f"\nGA {cutoff}, fold {fold}: epoch {best['epoch']}, {best['agg']} {best['tta']}, threshold {best['threshold']}")
@@ -153,6 +123,11 @@ for cutoff in cfg.tasks.preterm.cutoffs:
         model = model_from_conf(cfg, weights_path=f"{run_dir}/weights/fold_{fold}/{str(best['epoch']).zfill(3)}.pth")
         images = predict_images(model, loader, cfg, cutoff)
         del model
+
+        image_dfs.append(images.with_columns([pl.lit(f"fold_{fold}").alias("model"),
+                                              pl.lit(best['agg']).alias("agg"),
+                                              pl.lit(best['tta']).alias("tta"),
+                                              pl.lit(best['threshold']).alias("threshold")]))
 
         fold_dfs.append(patient_predictions(images, best['agg'], best['tta'], best['threshold'])
                         .with_columns([pl.lit(f"fold_{fold}").alias("model"),
@@ -162,16 +137,18 @@ for cutoff in cfg.tasks.preterm.cutoffs:
                                        pl.lit(best['threshold']).alias("threshold")]))
 
     folds_df = pl.concat(fold_dfs)
-
-    # Ensemble: mean of the folds' preds_normalized, which puts every fold's threshold at 0.5
-    ensemble_df = (folds_df.group_by("CPR_CHILD").agg([pl.col("preds_normalized").mean(),
-                                                       pl.col("label").first(),
-                                                       pl.col("treatment").first()])
-                   .with_columns([(pl.col("preds_normalized") >= 0.5).cast(pl.Int8).alias("preds_binary"),
-                                  pl.lit("ensemble").alias("model")]))
+    ensemble_df = ensemble_predictions(folds_df)
 
     predictions = pl.concat([folds_df, ensemble_df], how="diagonal").join(child_subgroups, on="CPR_CHILD", how="left")
     predictions.write_parquet(os.path.join(save_path, f"predictions_{cutoff}.parquet"))
+
+    # Every image and TTA flip of every fold, with each fold's settings, e.g. for analyse_ocr_protocols.py
+    image_predictions = (pl.concat(image_dfs)
+                         .with_columns(pl.col("img_path").str.replace(r"_\d+$", "").alias("image_path"))
+                         .join(image_files, on="image_path", how="left", validate="m:1")
+                         .drop("image_path")
+                         .join(child_subgroups, on="CPR_CHILD", how="left"))
+    image_predictions.write_parquet(os.path.join(save_path, f"image_predictions_{cutoff}.parquet"))
 
     # Metrics on every child and on each subgroup; bootstrap CIs for the ensemble only
     rows = []
@@ -185,7 +162,7 @@ for cutoff in cfg.tasks.preterm.cutoffs:
                 n_bootstrap = test_cfg.n_bootstrap
             else:
                 n_bootstrap = 0
-            rows.append({"group": group, "model": model_name, **evaluate(model_df, n_bootstrap, rng)})
+            rows.append({"group": group, "model": model_name, **evaluate_predictions(model_df, n_bootstrap, rng)})
 
     metrics_df = pl.DataFrame(rows)
     metrics_df.write_csv(os.path.join(save_path, f"metrics_{cutoff}.csv"))

@@ -46,6 +46,53 @@ def binary_metrics(device, t=0.5):
             'AUC': tm.AUROC(task='binary').to(device)}
 
 
+def metric_value(metric, preds, labels):
+    """One torchmetrics value; SensAtSpec also returns its threshold, which is dropped."""
+    metric.reset()
+    output = metric(preds, labels)
+    if isinstance(output, tuple):
+        output = output[0]
+    return output.item()
+
+
+def evaluate_predictions(df, n_bootstrap, rng):
+    """Metrics of child predictions, as in Metrics.log_model, with bootstrap 95% CIs if n_bootstrap > 0."""
+    # group_by returns children in a random order, so sort them for the seeded bootstrap to be reproducible
+    df = df.sort("CPR_CHILD")
+    labels = torch.tensor(df["label"].to_numpy(), dtype=torch.int32)
+    scores = torch.tensor(df["preds_normalized"].to_numpy(), dtype=torch.float32)
+    binary = torch.tensor(df["preds_binary"].to_numpy(), dtype=torch.float32)
+
+    result = {"children": len(df), "preterm": int(df["label"].sum())}
+    for name, metric in binary_metrics("cpu").items():
+        # Sensitivity and specificity use the call at the validation threshold
+        if name in ["Sensitivity", "Specificity"]:
+            preds = binary
+        else:
+            preds = scores
+        result[name] = round(metric_value(metric, preds, labels), 4)
+
+        boot_values = []
+        for _ in range(n_bootstrap):
+            idx = torch.from_numpy(rng.integers(0, len(df), size=len(df)))
+            if torch.unique(labels[idx]).numel() < 2:
+                continue
+            boot_values.append(metric_value(metric, preds[idx], labels[idx]))
+        if boot_values:
+            result[f"{name}_lower"] = round(np.percentile(boot_values, 2.5), 4)
+            result[f"{name}_upper"] = round(np.percentile(boot_values, 97.5), 4)
+    return result
+
+
+def ensemble_predictions(folds_df):
+    """Mean of the folds' preds_normalized per child, which puts every fold's threshold at 0.5."""
+    return (folds_df.group_by("CPR_CHILD").agg([pl.col("preds_normalized").mean(),
+                                                pl.col("label").first(),
+                                                pl.col("treatment").first()])
+            .with_columns([(pl.col("preds_normalized") >= 0.5).cast(pl.Int8).alias("preds_binary"),
+                           pl.lit("ensemble").alias("model")]))
+
+
 class Metrics():
     def __init__(self, cfg, save_path):
         self.cutoffs = cfg.tasks.preterm.cutoffs
