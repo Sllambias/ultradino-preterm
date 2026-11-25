@@ -97,10 +97,10 @@ if missing:
 child_subgroups = (df.group_by("CPR_BARN").agg([pl.col(column).first() for column in test_cfg.subgroups])
                    .rename({"CPR_BARN": "CPR_CHILD"}))
 
-# FILE_PATH of each loaded image, so the image predictions can be joined to other image tables (e.g. us-ocr)
-image_files = df.select(["image_path", "FILE_PATH"]).unique()
+# NO_OCR_FILE_PATH of each loaded image, so the image predictions can be joined to other image tables (e.g. us-ocr)
+image_files = df.select(["image_path", "NO_OCR_FILE_PATH"]).unique()
 if image_files["image_path"].n_unique() != len(image_files):
-    raise ValueError("Some image files belong to several FILE_PATHs")
+    raise ValueError("Some image files belong to several NO_OCR_FILE_PATHs")
 
 loader = DataLoader(EHRExtractDataset(df, cfg, train=False),
                     cfg.data.batch_size // 4,
