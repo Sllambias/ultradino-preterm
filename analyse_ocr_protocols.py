@@ -61,6 +61,14 @@ def load_protocols(ocr_path, path_column, path_root):
 
     # Rows without a path cannot be matched to an image
     ocr = ocr.drop_nulls(path_column)
+
+    # TEMP fix: the OCR paths use an old folder name. Remove when us-ocr is rerun on the current folders
+    old_folder = "RegionH_pseudonymized"
+    new_folder = "RegionH/regionH/2026"
+    n_renamed = ocr.filter(pl.col(path_column).str.contains(old_folder, literal=True)).height
+    print(f"TEMP fix: replaced {old_folder} with {new_folder} in {n_renamed:,} of {ocr.height:,} OCR paths")
+    ocr = ocr.with_columns(pl.col(path_column).str.replace_all(old_folder, new_folder, literal=True))
+
     paths = ocr[path_column].to_list()
     if path_root is not None:
         paths = [os.path.join(path_root, path) for path in paths]
@@ -239,7 +247,9 @@ for path in prediction_files:
     # img_path is the absolute path of the loaded image with the TTA flip appended, e.g. <image>.png_1
     image_paths = images["img_path"].str.replace(r"_\d+$", "").to_list()
     images = images.with_columns(
-        pl.Series("image_path", [os.path.normpath(image_path) for image_path in image_paths])
+        pl.Series(
+            "image_path", [os.path.normpath(image_path) for image_path in image_paths]
+        )
     )
 
     n_images = images["image_path"].n_unique()
