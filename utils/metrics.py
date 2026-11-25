@@ -20,6 +20,9 @@ class Metrics():
         self.fold = 0
         self.device = cfg.device.type
         self.n_bootstrap = 10000
+        # Validation metrics are also logged for the rows where each of these columns is True
+        self.subgroups = list(cfg.data.get("val_subgroups", []))
+        self.test_subgroup = cfg.data.get("test_subgroup")
 
         self.dfs = {str(c): [] for c in self.cutoffs}
         self.test_preds = {str(c): [] for c in self.cutoffs}
@@ -54,20 +57,42 @@ class Metrics():
             cutoffs = [cutoff]
         for cutoff in cutoffs:
             mask = data["masks"][str(cutoff)].flatten().cpu().numpy()
-            self.dfs[str(cutoff)].append(pl.DataFrame({'CPR_CHILD': data['IDs'],
-                                                       'img_path': data['img_paths'],
-                                                       'preds': outputs['preterm'][str(cutoff)]['preds'].flatten().cpu().numpy(),
-                                                       'label': (data['labels']['GA_weeks'] < float(cutoff)).flatten().cpu().numpy(),
-                                                       'treatment': data['treatment']}).filter(mask))
+            columns = {'CPR_CHILD': data['IDs'],
+                       'img_path': data['img_paths'],
+                       'preds': outputs['preterm'][str(cutoff)]['preds'].flatten().cpu().numpy(),
+                       'label': (data['labels']['GA_weeks'] < float(cutoff)).flatten().cpu().numpy(),
+                       'treatment': data['treatment']}
+            for subgroup in self.subgroups:
+                columns[subgroup] = data['subgroups'][subgroup]
+            self.dfs[str(cutoff)].append(pl.DataFrame(columns).filter(mask))
+
+    def compute_metrics(self, patient_dfs, agg, prefix=""):
+        """Every metric on the patient predictions of one aggregation, with and without TTA."""
+        metrics = {}
+        for name, metric in self.metrics.items():
+            for tta in ['tta', 'no-tta']:
+                preds = torch.tensor(patient_dfs[tta][agg].to_numpy(), dtype=torch.float32)
+                labels = torch.tensor(patient_dfs[tta]['label'].to_numpy(), dtype=torch.int32)
+
+                metric.reset()
+                output = metric(preds, labels)
+
+                if isinstance(output, tuple):
+                    metrics[f"{prefix}{name}_{agg}_{tta}"] = round(output[0].item(), 3)
+                    metrics[f"{prefix}{name}_cutoff_{agg}_{tta}"] = round(output[1].item(), 3)
+                else:
+                    metrics[f"{prefix}{name}_{agg}_{tta}"] = round(output.item(), 3)
+        return metrics
 
     def log_epoch(self, train_loss, val_loss):
         self.epoch += 1
         for cutoff in self.cutoffs:
             df = pl.concat(self.dfs[str(cutoff)])
         
-            patient_aggs = ([expr.alias(name) for name, expr in self.agg_fns.items()] 
+            patient_aggs = ([expr.alias(name) for name, expr in self.agg_fns.items()]
                             + [pl.col("label").first().alias("label"),
-                               pl.col("treatment").first().alias("treatment")])
+                               pl.col("treatment").first().alias("treatment")]
+                            + [pl.col(subgroup).first().alias(subgroup) for subgroup in self.subgroups])
             
             patient_df_tta = df.group_by("CPR_CHILD").agg(patient_aggs)
             
@@ -79,23 +104,13 @@ class Metrics():
             
 
             for agg in ['avg', 'quantile', 'max']:
-                metrics = {}                        
+                metrics = self.compute_metrics(patient_dfs, agg)
 
-                for name, metric in self.metrics.items():
-                    for tta in ['tta', 'no-tta']:
-                        preds = torch.tensor(patient_dfs[tta][agg].to_numpy(), dtype=torch.float32)
-                        labels = torch.tensor(patient_dfs[tta]['label'].to_numpy(), dtype=torch.int32)
+                # Also on each subgroup alone, e.g. parity_0_AUC_avg_tta. The best epoch is still picked on all rows
+                for subgroup in self.subgroups:
+                    subgroup_dfs = {tta: patient_df.filter(pl.col(subgroup)) for tta, patient_df in patient_dfs.items()}
+                    metrics.update(self.compute_metrics(subgroup_dfs, agg, prefix=f"{subgroup}_"))
 
-                        metric.reset()
-                        output = metric(preds, labels)
-                    
-                        if isinstance(output, tuple):
-                            metrics[f"{name}_{agg}_{tta}"] = round(output[0].item(), 3)
-                            metrics[f"{name}_cutoff_{agg}_{tta}"] = round(output[1].item(), 3)
-                        else:
-                            metrics[f"{name}_{agg}_{tta}"] = round(output.item(), 3)
-                      
-                        
                 best_tta = max(["tta", "no-tta"], key=lambda tta: metrics[f"SensAtSpec_{agg}_{tta}"])
                 best_score = metrics[f"SensAtSpec_{agg}_{best_tta}"]
                 best_threshold = metrics[f"SensAtSpec_cutoff_{agg}_{best_tta}"]
@@ -110,7 +125,7 @@ class Metrics():
                     self.best_predictions[str(cutoff)] = (patient_dfs[best_tta].select(["CPR_CHILD",
                                                                                         agg,
                                                                                         "label",
-                                                                                        "treatment"])
+                                                                                        "treatment"] + self.subgroups)
                                                           .rename({agg: "preds"}).with_columns([pl.lit(agg).alias("agg"),
                                                                                                 pl.lit(best_tta).alias('tta'),
                                                                                                 pl.lit(best_threshold).alias("threshold")]))
@@ -225,7 +240,7 @@ class Metrics():
         self.fold += 1
         self.best_df = {}
     
-    def get_val_preds_and_labels(self, cutoff, population):
+    def get_val_preds_and_labels(self, cutoff, population, subgroup=None):
         temp_dfs = []
 
         for path in (self.pred_path / "validation").glob(f"predictions_{cutoff}*"):
@@ -233,6 +248,8 @@ class Metrics():
             temp_df = temp_df.with_columns((pl.col("preds") - pl.col("threshold") + 0.50).alias("preds"))
             if population == 'Non-treated':
                 temp_df = temp_df.filter(~pl.col("treatment"))
+            if subgroup is not None:
+                temp_df = temp_df.filter(pl.col(subgroup))
             temp_dfs.append(temp_df)
         df = pl.concat(temp_dfs)
         preds = torch.tensor(df["preds"].to_numpy(), dtype=torch.float32).to(self.device)
@@ -248,6 +265,8 @@ class Metrics():
             else:
                 df = pl.read_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
             report = []
+            if self.test_subgroup is not None:
+                report.append(f"Test folds only hold rows where {self.test_subgroup} is True\n\n")
             for pop, pop_df in [("All Births", df), ("Non-treated", df.filter(~pl.col("treatment")))]:
                 #Get fold variability
                 for fold in range(df['fold'].max()):
@@ -310,6 +329,7 @@ class Metrics():
                 metrics = self.get_metrics()
                 rng = np.random.default_rng()
                 val_preds, val_labels = self.get_val_preds_and_labels(cutoff, pop)
+                subgroup_val = {subgroup: self.get_val_preds_and_labels(cutoff, pop, subgroup) for subgroup in self.subgroups}
 
                 for name, metric in metrics.items():
                     results[pop][name] = {}
@@ -329,6 +349,14 @@ class Metrics():
                     else:
                         results[pop][name]['mean'] = output.item()
                         results[pop][name]['val'] = val_output.item()
+
+                    for subgroup, (subgroup_preds, subgroup_labels) in subgroup_val.items():
+                        metric.reset()
+                        subgroup_output = metric(subgroup_preds, subgroup_labels)
+                        if isinstance(subgroup_output, tuple):
+                            results[pop][name][f'val_{subgroup}'] = subgroup_output[0].item()
+                        else:
+                            results[pop][name][f'val_{subgroup}'] = subgroup_output.item()
                     # Bootstrap 95% CI
                     boot_values = []
                 
@@ -366,9 +394,12 @@ class Metrics():
                               f"\tMetrics:\n")
             
                 for name, result in results[pop].items():
+                    validation = f"Validation: {result['val']:.4f}"
+                    for subgroup in self.subgroups:
+                        validation += f", {subgroup}: {result[f'val_{subgroup}']:.4f}"
                     report.append(f"\t{name}: {result['mean']:.4f} "
                                   f"(95% CI: {result['lower']:.4f}–{result['upper']:.4f}) "
-                                  f"(Validation: {result['val']:.4f})\n")
+                                  f"({validation})\n")
                 report.append('\n\n')
     
             report = "".join(report)

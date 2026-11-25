@@ -49,6 +49,31 @@ def population_counts(df, cutoff):
             f"children GA < {cutoff}": df.filter(pl.col("GA") // 7 < cutoff)["CPR_BARN"].n_unique()}
 
 
+def print_counts(before, after):
+    """Print population_counts before and after a filter."""
+    for column in before:
+        print(f"  {column:20s} {before[column]:>10,} -> {after[column]:>10,}  ({before[column] - after[column]:,} removed)")
+
+
+def keep_subgroup(df, column, cfg, name):
+    """Keep the rows where `column` is True, printing the counts before and after."""
+    cutoff = max(cfg.tasks.preterm.cutoffs)
+    kept = df.filter(pl.col(column).cast(pl.Boolean).fill_null(False))
+    print(f"\n{name}: keeping only rows where {column} is True")
+    print_counts(population_counts(df, cutoff), population_counts(kept, cutoff))
+    return kept
+
+
+def ehr_extract_collate_fn(batch):
+    """collate_fn plus the subgroup flags, repeated for every test time augmentation like the IDs."""
+    sample = collate_fn(batch)
+    n_augmentations = len(sample["IDs"]) // len(batch)
+    sample["subgroups"] = {}
+    for name in batch[0]["subgroups"]:
+        sample["subgroups"][name] = [item["subgroups"][name] for item in batch for _ in range(n_augmentations)]
+    return sample
+
+
 def remove_excluded(df, cfg, name):
     """Drop planned preterm births and rows flagged in data.remove, printing the counts before and after."""
     missing = [var for var in cfg.data.remove if var not in df.columns]
@@ -65,11 +90,8 @@ def remove_excluded(df, cfg, name):
 
     kept = df.filter(~pl.any_horizontal(list(reasons.values())))
 
-    before = population_counts(df, cutoff)
-    after = population_counts(kept, cutoff)
     print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks and data.remove {list(cfg.data.remove)}")
-    for column in before:
-        print(f"  {column:20s} {before[column]:>10,} -> {after[column]:>10,}  ({before[column] - after[column]:,} removed)")
+    print_counts(population_counts(df, cutoff), population_counts(kept, cutoff))
     print("  children matching each reason (a child can match several):")
     for reason, expression in reasons.items():
         print(f"    {reason}: {df.filter(expression)['CPR_BARN'].n_unique():,}")
@@ -104,7 +126,8 @@ class EHRExtractDataset(PreTermDataset):
         if self.get_segs:
             raise ValueError("EHR_extract populations have no segmentation_path, so segmentation can't be used")
 
-        missing = [var for var in list(self.ehr_vars) + self.aux_vars if var not in df.columns]
+        val_subgroups = list(cfg.data.get("val_subgroups", []))
+        missing = [var for var in list(self.ehr_vars) + self.aux_vars + val_subgroups if var not in df.columns]
         if missing:
             raise ValueError(f"The EHR_extract population has no columns {missing}")
 
@@ -122,6 +145,9 @@ class EHRExtractDataset(PreTermDataset):
         self.physical_deltas = {"PDX": df["PDX"].fill_null(0.0).to_numpy(),
                                 "PDY": df["PDY"].fill_null(0.0).to_numpy()}
         self.treatment = (df["progesterone"] | df["cerclage"]).to_list()
+
+        # Flags of the data.val_subgroups columns, which Metrics also logs validation metrics for
+        self.subgroups = {var: df[var].cast(pl.Boolean).fill_null(False).to_list() for var in val_subgroups}
 
     def __len__(self):
         return len(self.image_paths)
@@ -164,7 +190,8 @@ class EHRExtractDataset(PreTermDataset):
                 'ID': self.ids[idx],
                 'treatment': self.treatment[idx],
                 'labels': labels,
-                'segmentation': torch.tensor([], dtype=torch.bool)}
+                'segmentation': torch.tensor([], dtype=torch.bool),
+                'subgroups': {name: flags[idx] for name, flags in self.subgroups.items()}}
 
 
 class EHRExtractDataSplits:
@@ -175,6 +202,7 @@ class EHRExtractDataSplits:
         self.highest_GA = max(cfg.tasks.preterm.cutoffs)
         self.folds = cfg.data.folds
         self.seed = cfg.data.seed
+        self.test_subgroup = cfg.data.get("test_subgroup")
 
         if self.folds < 2:
             raise Exception(f"{self.folds} folds set, must be atleast 2")
@@ -184,6 +212,9 @@ class EHRExtractDataSplits:
 
         test_df = load_population(cfg.data.test_path, cfg.data.image_root)
         train_df = load_population(cfg.data.train_path, cfg.data.image_root)
+
+        if self.test_subgroup is not None and self.test_subgroup not in test_df.columns:
+            raise ValueError(f"{cfg.data.test_path} has no column {self.test_subgroup} for data.test_subgroup")
 
         # Filtered before folds and oversampling, so both only see rows that are trained and evaluated on
         test_df = remove_excluded(test_df, cfg, "test")
@@ -236,6 +267,10 @@ class EHRExtractDataSplits:
         train_df = self.test_df.filter((pl.col('fold') != fold) & (pl.col('fold') != val_fold))
         train_df = pl.concat([self.train_df, train_df])
 
+        # Only the test fold is restricted. The rows it drops belong to its mothers, so they don't move to training
+        if self.test_subgroup is not None:
+            test_df = keep_subgroup(test_df, self.test_subgroup, cfg, f"fold {fold} test")
+
         for col in ["CPR_MOR", "CPR_BARN", "FILE_PATH"]:
             overlap_test = (set(train_df[col].drop_nulls().unique()) & set(test_df[col].drop_nulls().unique()))
             overlap_val = (set(train_df[col].drop_nulls().unique()) & set(val_df[col].drop_nulls().unique()))
@@ -279,7 +314,7 @@ class EHRExtractDataSplits:
                                  pin_memory=True,
                                  drop_last=True,
                                  num_workers=cfg.data.workers,
-                                 collate_fn=collate_fn)
+                                 collate_fn=ehr_extract_collate_fn)
 
         ValLoader = DataLoader(ValData,
                                val_test_batch_size,
@@ -287,7 +322,7 @@ class EHRExtractDataSplits:
                                pin_memory=False,
                                drop_last=False,
                                num_workers=cfg.data.workers,
-                               collate_fn=collate_fn)
+                               collate_fn=ehr_extract_collate_fn)
 
         TestLoader = DataLoader(TestData,
                                 val_test_batch_size,
@@ -295,6 +330,6 @@ class EHRExtractDataSplits:
                                 pin_memory=False,
                                 drop_last=False,
                                 num_workers=cfg.data.workers,
-                                collate_fn=collate_fn)
+                                collate_fn=ehr_extract_collate_fn)
 
         return TrainLoader, ValLoader, TestLoader
