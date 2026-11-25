@@ -11,6 +11,9 @@ aggregation, TTA and threshold, and the folds are ensembled as in test_ehr_extra
   - "all 4 protocols": only children with images of all 4 protocols, so the combinations differ only in which
     images are used. The Shapley values split this view's AUC above chance (0.5) between the 4 protocols.
 
+The OCR rows are matched to the absolute image paths that the models were tested on (img_path in the image
+predictions, without its TTA suffix).
+
 Usage: python analyse_ocr_protocols.py <run_dir>/<test name> <us-ocr results.csv> [--ocr-path-column file_path]
        [--ocr-path-root <folder joined onto the OCR paths>]
 """
@@ -46,9 +49,9 @@ def cervix_protocols():
 
 
 def load_protocols(ocr_path, path_column, path_root):
-    """Cervix protocol of each image in a us-ocr results CSV, keyed by NO_OCR_FILE_PATH (null if OCR found none).
+    """Cervix protocol of each image in a us-ocr results CSV, keyed by image_path (null if OCR found none).
 
-    If path_root is given, it is joined onto the path column first (absolute paths are kept as they are).
+    image_path is the path column with path_root joined onto it if given (absolute paths are kept as they are).
     """
     ocr = pl.read_csv(ocr_path, infer_schema=False)
     if path_column not in ocr.columns:
@@ -58,13 +61,17 @@ def load_protocols(ocr_path, path_column, path_root):
 
     # Rows without a path cannot be matched to an image
     ocr = ocr.drop_nulls(path_column)
+    paths = ocr[path_column].to_list()
     if path_root is not None:
-        paths = [os.path.join(path_root, path) for path in ocr[path_column]]
-        ocr = ocr.with_columns(pl.Series(path_column, paths))
+        paths = [os.path.join(path_root, path) for path in paths]
+    # normpath so that e.g. a trailing slash on the root does not stop a match
+    ocr = ocr.with_columns(
+        pl.Series("image_path", [os.path.normpath(path) for path in paths])
+    )
 
     ocr = ocr.select(
         [
-            pl.col(path_column).alias("NO_OCR_FILE_PATH"),
+            pl.col("image_path"),
             pl.when(pl.col("protocol").is_in(cervix_protocols()))
             .then(pl.col("protocol"))
             .alias("protocol"),
@@ -73,7 +80,7 @@ def load_protocols(ocr_path, path_column, path_root):
 
     conflicting = (
         ocr.drop_nulls("protocol")
-        .group_by("NO_OCR_FILE_PATH")
+        .group_by("image_path")
         .agg(pl.col("protocol").n_unique().alias("n"))
         .filter(pl.col("n") > 1)
         .height
@@ -85,17 +92,17 @@ def load_protocols(ocr_path, path_column, path_root):
 
     # Resumed us-ocr runs can append a path twice, so keep one row per image, preferring one with a protocol
     return ocr.sort(pl.col("protocol").is_null(), maintain_order=True).unique(
-        subset="NO_OCR_FILE_PATH", keep="first", maintain_order=True
+        subset="image_path", keep="first", maintain_order=True
     )
 
 
 def print_coverage(images):
     """Images and children per protocol, and children by how many of the 4 protocols they have."""
-    image_rows = images.select(["CPR_CHILD", "NO_OCR_FILE_PATH", "protocol"]).unique()
+    image_rows = images.select(["CPR_CHILD", "image_path", "protocol"]).unique()
     children = image_rows["CPR_CHILD"].n_unique()
 
     print(
-        f"\n{image_rows['NO_OCR_FILE_PATH'].n_unique():,} images of {children:,} children, "
+        f"\n{image_rows['image_path'].n_unique():,} images of {children:,} children, "
         f"{image_rows['protocol'].is_not_null().sum():,} with a cervix protocol"
     )
     per_protocol = (
@@ -137,7 +144,7 @@ def evaluate_images(images, n_bootstrap, rng):
     """Ensemble metrics with bootstrap CIs, plus the mean and SD of the fold models' AUCs."""
     folds_df, ensemble_df = child_predictions(images)
     result = {
-        "images": images["NO_OCR_FILE_PATH"].n_unique(),
+        "images": images["image_path"].n_unique(),
         **evaluate_predictions(ensemble_df, n_bootstrap, rng),
     }
 
@@ -191,12 +198,12 @@ parser.add_argument(
 parser.add_argument(
     "--ocr-path-column",
     default="file_path",
-    help="us-ocr column that matches the population's NO_OCR_FILE_PATH (after --ocr-path-root is joined onto it)",
+    help="us-ocr column with the image paths. With --ocr-path-root joined onto it, it must give the absolute "
+    "img_path of the test predictions",
 )
 parser.add_argument(
     "--ocr-path-root",
-    help="Folder joined onto every path in --ocr-path-column before matching, e.g. when the OCR paths are "
-    "relative to another folder than NO_OCR_FILE_PATH",
+    help="Folder joined onto every path in --ocr-path-column before matching, when the OCR paths are relative",
 )
 parser.add_argument(
     "--subgroup", help="Only use children where this column is True, e.g. parity_0"
@@ -229,16 +236,22 @@ for path in prediction_files:
     if args.subgroup is not None:
         images = images.filter(pl.col(args.subgroup))
 
-    n_images = images["NO_OCR_FILE_PATH"].n_unique()
-    images = images.join(ocr, on="NO_OCR_FILE_PATH", how="left")
-    n_matched = images.filter(pl.col("NO_OCR_FILE_PATH").is_in(ocr["NO_OCR_FILE_PATH"].implode()))[
-        "NO_OCR_FILE_PATH"
+    # img_path is the absolute path of the loaded image with the TTA flip appended, e.g. <image>.png_1
+    image_paths = images["img_path"].str.replace(r"_\d+$", "").to_list()
+    images = images.with_columns(
+        pl.Series("image_path", [os.path.normpath(image_path) for image_path in image_paths])
+    )
+
+    n_images = images["image_path"].n_unique()
+    images = images.join(ocr, on="image_path", how="left")
+    n_matched = images.filter(pl.col("image_path").is_in(ocr["image_path"].implode()))[
+        "image_path"
     ].n_unique()
     print(
         f"\n========== GA {cutoff}{' (' + args.subgroup + ')' if args.subgroup else ''} =========="
     )
     print(
-        f"{n_matched:,} of {n_images:,} test images are in the us-ocr results (on {args.ocr_path_column} = NO_OCR_FILE_PATH)"
+        f"{n_matched:,} of {n_images:,} test images are in the us-ocr results (on {args.ocr_path_column} = img_path without the TTA suffix)"
     )
     print_coverage(images)
 
