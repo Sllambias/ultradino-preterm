@@ -13,6 +13,39 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+
+def aggregation_functions():
+    """How the image predictions of a child are combined into one prediction."""
+    return {"avg": pl.col("preds").mean(),
+            "max": pl.col("preds").max(),
+            "quantile": pl.col("preds").quantile(0.75)}
+
+
+def patient_predictions(df, agg, tta, threshold):
+    """One row per child: its image predictions combined by agg, the call at threshold and preds_normalized (threshold at 0.5)."""
+    if tta == 'no-tta':
+        df = df.filter(pl.col("img_path").str.ends_with("_1"))
+
+    agg_fn = aggregation_functions()[agg]
+
+    return (df.group_by("CPR_CHILD").agg([agg_fn.alias("preds"),
+                                          pl.col("label").first().alias("label"),
+                                          pl.col("treatment").first().alias("treatment")])
+            .with_columns([(pl.col("preds") >= threshold).cast(pl.Int8).alias("preds_binary"),
+                           (pl.when(pl.col("preds") < threshold)
+                            .then(0.5 * pl.col("preds") / threshold)
+                            .otherwise(0.5 + 0.5 * (pl.col("preds") - threshold) / (1 - threshold))
+                            .alias("preds_normalized"))]))
+
+
+def binary_metrics(device, t=0.5):
+    """Sensitivity and specificity at threshold t, sensitivity at 85% specificity, and AUC."""
+    return {'Sensitivity': tm.Recall(task='binary', threshold=t).to(device),
+            'Specificity': tm.Specificity(task='binary', threshold=t).to(device),
+            'SensAtSpec': tm.SensitivityAtSpecificity(min_specificity=0.85, task='binary').to(device),
+            'AUC': tm.AUROC(task='binary').to(device)}
+
+
 class Metrics():
     def __init__(self, cfg, save_path):
         self.cutoffs = cfg.tasks.preterm.cutoffs
@@ -43,9 +76,7 @@ class Metrics():
         self.metrics_path.mkdir(parents=True, exist_ok=True)
         self.plot_path.mkdir(parents=True, exist_ok=True)
         
-        self.agg_fns = {"avg": pl.col("preds").mean(),
-                        "max": pl.col("preds").max(),
-                        "quantile": pl.col("preds").quantile(0.75)}
+        self.agg_fns = aggregation_functions()
 
         self.metrics = self.get_metrics()
 
@@ -202,25 +233,15 @@ class Metrics():
     def log_fold(self, cutoff):
         df = pl.concat(self.dfs[str(cutoff)])
         best = self.best_score[str(cutoff)]
-        if best['tta'] == 'no-tta':
-            df = df.filter(pl.col("img_path").str.ends_with("_1"))
-        
-        agg_fn = self.agg_fns[best['agg']]
 
-        patient_df = (df.group_by("CPR_CHILD").agg([agg_fn.alias("preds"),
-                                                   pl.col("label").first().alias("label"),
-                                                   pl.col("treatment").first().alias("treatment")])
+        patient_df = (patient_predictions(df, best['agg'], best['tta'], best['threshold'])
                       .with_columns([pl.lit(self.fold).alias("fold"),
                                      pl.lit(best['agg']).alias('agg'),
                                      pl.lit(best['tta']).alias('tta'),
-                                     pl.lit(best["threshold"]).alias('threshold'),
-                                     (pl.col("preds") >= best["threshold"])
-                                     .cast(pl.Int8).alias("preds_binary"),
-                                     (pl.when(pl.col("preds") < best["threshold"])
-                                     .then(0.5 * pl.col("preds") / best["threshold"])
-                                     .otherwise(0.5 + 0.5 * (pl.col("preds") - best["threshold"]) / (1 - best["threshold"]))
-                                     .alias("preds_normalized"))]))
-                                     
+                                     pl.lit(best["threshold"]).alias('threshold')])
+                      .select(["CPR_CHILD", "preds", "label", "treatment", "fold", "agg", "tta", "threshold",
+                               "preds_binary", "preds_normalized"]))
+
         self.test_preds[str(cutoff)].append(patient_df)
         pl.concat(self.test_preds[str(cutoff)]).write_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
     
@@ -409,12 +430,7 @@ class Metrics():
                             
                     
     def get_metrics(self, t=0.5):
-        metrics = {'Sensitivity': tm.Recall(task='binary', threshold=t).to(self.device),
-                   'Specificity': tm.Specificity(task='binary', threshold=t).to(self.device),
-                   'SensAtSpec': tm.SensitivityAtSpecificity(min_specificity=0.85, task='binary').to(self.device),
-                   'AUC': tm.AUROC(task='binary').to(self.device)}
-        
-        return metrics
+        return binary_metrics(self.device, t)
     
     def restart(self):
         max_folds = []

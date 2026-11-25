@@ -1,0 +1,14 @@
+#Population that test_ehr_extract.py tests a training run on. Results go to <run_dir>/<name>/
+name: prospective_img_v1
+
+#EHR_extract prospective_img_v1 output (no holdout split, so only the train_and_test file)
+population_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/prospective_img_v1/prospective_img_v1_population_train_and_test.parquet
+#NO_OCR_FILE_PATH is joined onto this folder (absolute paths are kept as they are). Check where the prospective PNGs are
+image_root: /projects/users/data/UCPH/DeepFetal/ultrasound/PNG_PROCESSED_NO_OCR_TMP_DIR
+
+#Metrics are reported on every child and again on the children where each of these columns is True
+subgroups: [parity_0]
+
+workers: 32
+n_bootstrap: 10000 #Bootstrap resamples for the ensemble's 95% CIs
+seed: 0 #Bootstrap resampling
