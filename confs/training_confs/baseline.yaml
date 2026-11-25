@@ -1,6 +1,7 @@
 info:
-  name: baseline_${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
-  output_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/ #Run is saved in <output_dir>/<name>_<cutoff>/
+  name: baseline
+  timestamp: ${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
+  output_dir: /projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/ #Run is saved in <output_dir>/<name>_<cutoff>_<timestamp>/
 
 data:
   train_path: /projects/users/data/UCPH/DeepFetal/projects/preterm/Data/dataset_v7/train.parquet

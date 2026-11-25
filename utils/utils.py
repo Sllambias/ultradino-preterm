@@ -34,6 +34,10 @@ def setup(cfg):
     else:
         name = f"{cfg.info.name}_multihead"
 
+    #The start time goes after the cutoff, e.g. baseline_34_2026-11-25_21-42-00
+    if cfg.info.get("timestamp") is not None:
+        name = f"{name}_{cfg.info.timestamp}"
+
     #Configs without info.output_dir keep the old training_runs folder
     output_dir = cfg.info.get("output_dir", "/projects/users/data/UCPH/DeepFetal/projects/preterm/training_runs/Running/")
     #Expand ~, which os.path.join would otherwise keep as a folder named "~"
