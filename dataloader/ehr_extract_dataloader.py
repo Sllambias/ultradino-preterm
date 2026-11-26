@@ -75,10 +75,11 @@ def ehr_extract_collate_fn(batch):
 
 
 def remove_excluded(df, cfg, name):
-    """Drop planned preterm births and rows flagged in data.remove, printing the counts before and after."""
-    missing = [var for var in cfg.data.remove if var not in df.columns]
+    """Drop planned preterm births, rows flagged in data.remove and rows not flagged in data.keep, printing the counts."""
+    keep = list(cfg.data.get("keep", []))
+    missing = [var for var in list(cfg.data.remove) + keep if var not in df.columns]
     if missing:
-        raise ValueError(f"The {name} population has no columns {missing} from data.remove")
+        raise ValueError(f"The {name} population has no columns {missing} from data.remove or data.keep")
 
     # No-MP rule: preterm births after a planned C-section or induction are left out.
     # With several cutoffs, the highest one is used for every head.
@@ -87,10 +88,14 @@ def remove_excluded(df, cfg, name):
     reasons = {f"planned birth at GA < {cutoff} weeks": (pl.col("GA") // 7 < cutoff) & planned}
     for var in cfg.data.remove:
         reasons[var] = pl.col(var).cast(pl.Boolean).fill_null(False)
+    # A null in a data.keep column counts as False, so the row is left out
+    for var in keep:
+        reasons[f"{var} not True"] = ~pl.col(var).cast(pl.Boolean).fill_null(False)
 
     kept = df.filter(~pl.any_horizontal(list(reasons.values())))
 
-    print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks and data.remove {list(cfg.data.remove)}")
+    print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks, data.remove {list(cfg.data.remove)} "
+          f"and rows not True in data.keep {keep}")
     print_counts(population_counts(df, cutoff), population_counts(kept, cutoff))
     print("  children matching each reason (a child can match several):")
     for reason, expression in reasons.items():

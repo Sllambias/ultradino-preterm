@@ -100,7 +100,7 @@ save_path = os.path.join(run_dir, test_cfg.name)
 os.makedirs(save_path, exist_ok=True)
 
 df = load_population(test_cfg.population_path, cfg.data.image_root)
-# The same exclusions as in training: the no-MP rule and data.remove
+# The same exclusions as in training: the no-MP rule, data.remove and data.keep
 df = remove_excluded(df, cfg, test_cfg.name)
 
 missing = [column for column in test_cfg.subgroups if column not in df.columns]
