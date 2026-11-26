@@ -5,7 +5,8 @@ Performance of a test_ehr_extract.py run on each cervix protocol read by the us-
 combination of the protocols.
 
 For a combination, each child's prediction is rebuilt from only its images of those protocols, with each fold's
-aggregation, TTA and threshold, and the folds are ensembled as in test_ehr_extract.py. Two views:
+aggregation, TTA and threshold, and the folds are ensembled as in test_ehr_extract.py. Only the folds in the image
+predictions are used, i.e. those that had finished training when test_ehr_extract.py ran. Two views:
   - "with protocols": every child with at least one image of the combination. Shows how each combination does
     where it is available, but different combinations are tested on different children.
   - "all 4 protocols": only children with images of all 4 protocols, so the combinations differ only in which
@@ -153,6 +154,7 @@ def evaluate_images(images, n_bootstrap, rng):
     folds_df, ensemble_df = child_predictions(images)
     result = {
         "images": images["image_path"].n_unique(),
+        "folds": folds_df["model"].n_unique(),
         **evaluate_predictions(ensemble_df, n_bootstrap, rng),
     }
 
@@ -260,6 +262,9 @@ for path in prediction_files:
     print(
         f"\n========== GA {cutoff}{' (' + args.subgroup + ')' if args.subgroup else ''} =========="
     )
+    # test_ehr_extract.py only tests the folds that had finished training
+    fold_names = sorted(images["model"].unique().to_list())
+    print(f"Ensemble of the {len(fold_names)} folds in the test predictions: {', '.join(fold_names)}")
     print(
         f"{n_matched:,} of {n_images:,} test images are in the us-ocr results (on {args.ocr_path_column} = img_path without the TTA suffix)"
     )

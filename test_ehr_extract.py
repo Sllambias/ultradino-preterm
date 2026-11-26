@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Test the fold models of a train_ehr_extract.py run on another EHR_extract population, e.g. prospective_img_v1.
+Only folds that have finished training are used, so a run can be tested while its last folds still train.
 
 Usage: python test_ehr_extract.py <run_dir> confs/test_confs/prospective_img_v1.yaml
 """
@@ -24,6 +25,17 @@ from utils.model_utils import model_from_conf, mixed_precision
 import warnings
 warnings.filterwarnings("ignore", message="The image is already gray.")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
+
+
+def finished_folds(run_dir, cutoffs, n_folds):
+    """Folds whose training has ended, i.e. Metrics.reset has saved their validation predictions for every cutoff."""
+    folds = []
+    for fold in range(n_folds):
+        saved = [os.path.exists(f"{run_dir}/predictions/validation/predictions_{cutoff}_fold_{fold}.parquet")
+                 for cutoff in cutoffs]
+        if all(saved):
+            folds.append(fold)
+    return folds
 
 
 def best_checkpoint(run_dir, cutoff, fold):
@@ -110,13 +122,19 @@ loader = DataLoader(EHRExtractDataset(df, cfg, train=False),
                     num_workers=cfg.data.workers,
                     collate_fn=ehr_extract_collate_fn)
 
-#%%Predict with every fold model and evaluate
+#%%Predict with every finished fold model and evaluate
+# Folds still training are left out, so a run can be tested before all its folds are done
+folds = finished_folds(run_dir, cfg.tasks.preterm.cutoffs, cfg.data.folds)
+if not folds:
+    raise FileNotFoundError(f"No fold of {run_dir} has finished training (no predictions/validation/ parquets)")
+print(f"Testing the {len(folds)} of {cfg.data.folds} folds that have finished training: {folds}")
+
 rng = np.random.default_rng(test_cfg.seed)
 
 for cutoff in cfg.tasks.preterm.cutoffs:
     fold_dfs = []
     image_dfs = []
-    for fold in range(cfg.data.folds):
+    for fold in folds:
         best = best_checkpoint(run_dir, cutoff, fold)
         print(f"\nGA {cutoff}, fold {fold}: epoch {best['epoch']}, {best['agg']} {best['tta']}, threshold {best['threshold']}")
 
@@ -156,7 +174,7 @@ for cutoff in cfg.tasks.preterm.cutoffs:
     for column in test_cfg.subgroups:
         groups[column] = pl.col(column)
     for group, condition in groups.items():
-        for model_name in [f"fold_{fold}" for fold in range(cfg.data.folds)] + ["ensemble"]:
+        for model_name in [f"fold_{fold}" for fold in folds] + ["ensemble"]:
             model_df = predictions.filter((pl.col("model") == model_name) & condition)
             if model_name == "ensemble":
                 n_bootstrap = test_cfg.n_bootstrap
@@ -166,7 +184,7 @@ for cutoff in cfg.tasks.preterm.cutoffs:
 
     metrics_df = pl.DataFrame(rows)
     metrics_df.write_csv(os.path.join(save_path, f"metrics_{cutoff}.csv"))
-    print(f"\nGA {cutoff} on {test_cfg.name}:")
+    print(f"\nGA {cutoff} on {test_cfg.name}, ensemble of folds {folds}:")
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
         print(metrics_df.select(["group", "model", "children", "preterm", "AUC", "SensAtSpec", "Sensitivity", "Specificity"]))
 
