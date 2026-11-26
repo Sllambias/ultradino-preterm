@@ -112,6 +112,7 @@ class Metrics():
         self.n_bootstrap = 10000
         # Validation metrics are also logged for the rows where each of these columns is True
         self.subgroups = list(cfg.data.get("val_subgroups", []))
+        self.val_subgroup = cfg.data.get("val_subgroup")
         self.test_subgroup = cfg.data.get("test_subgroup")
 
         self.dfs = {str(c): [] for c in self.cutoffs}
@@ -343,6 +344,9 @@ class Metrics():
             else:
                 df = pl.read_parquet(self.pred_path / f"predictions_{cutoff}.parquet")
             report = []
+            if self.val_subgroup is not None:
+                report.append(f"Validation folds only hold rows where {self.val_subgroup} is True, "
+                              f"so the best epoch, aggregation, TTA and threshold were chosen on them\n")
             if self.test_subgroup is not None:
                 report.append(f"Test folds only hold rows where {self.test_subgroup} is True\n\n")
             for pop, pop_df in [("All Births", df), ("Non-treated", df.filter(~pl.col("treatment")))]:

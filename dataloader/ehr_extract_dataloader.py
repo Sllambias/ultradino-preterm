@@ -211,6 +211,7 @@ class EHRExtractDataSplits:
         self.highest_GA = max(cfg.tasks.preterm.cutoffs)
         self.folds = cfg.data.folds
         self.seed = cfg.data.seed
+        self.val_subgroup = cfg.data.get("val_subgroup")
         self.test_subgroup = cfg.data.get("test_subgroup")
 
         if self.folds < 3:
@@ -220,6 +221,9 @@ class EHRExtractDataSplits:
         test_df = load_population(cfg.data.test_path, cfg.data.image_root)
         df = pl.concat([train_df, test_df], how="vertical_relaxed")
         print(f"Pooled {len(train_df):,} train and {len(test_df):,} test rows into {len(df):,} rows")
+
+        if self.val_subgroup is not None and self.val_subgroup not in df.columns:
+            raise ValueError(f"The populations have no column {self.val_subgroup} for data.val_subgroup")
 
         if self.test_subgroup is not None and self.test_subgroup not in df.columns:
             raise ValueError(f"The populations have no column {self.test_subgroup} for data.test_subgroup")
@@ -272,7 +276,11 @@ class EHRExtractDataSplits:
 
         train_df = self.df.filter((pl.col('fold') != fold) & (pl.col('fold') != val_fold))
 
-        # Only the test fold is restricted. The rows it drops belong to its mothers, so they don't move to training
+        # Only the validation and test folds are restricted.
+        # The rows they drop belong to their mothers, so they don't move to training
+        if self.val_subgroup is not None:
+            val_df = keep_subgroup(val_df, self.val_subgroup, cfg, f"fold {fold} validation")
+
         if self.test_subgroup is not None:
             test_df = keep_subgroup(test_df, self.test_subgroup, cfg, f"fold {fold} test")
 

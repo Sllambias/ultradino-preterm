@@ -1,10 +1,11 @@
 info:
-  name: ehr_extract_P1_img_v7
+  name: ehr_extract_pre26_img_v7
   timestamp: ${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
   output_dir: ~/repos/ultradino-preterm/outputs #Run is saved in <output_dir>/<name>_<cutoff>_<timestamp>/
 
 data:
-  # EHR_extract preterm_P1_img_v7 outputs (EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_P1_img_v7).
+  # EHR_extract preterm_pre2026_img_v7 outputs (all parities, with a parity_0 column;
+  # EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_pre2026_img_v7).
   # Both parquets are pooled and split into data.folds folds by CPR_MOR, so every row is test data for one fold model
   train_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_pre2026_img_v7/preterm_pre2026_img_v7_population_train.parquet
   test_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_pre2026_img_v7/preterm_pre2026_img_v7_population_test.parquet
@@ -22,6 +23,12 @@ data:
   #Rows where these columns are True are filtered out before training.
   #c-section_acute and induced_acute are always filtered out below the highest cutoff (no-MP rule), so don't list them here
   remove: [multi_birth]
+  #Training uses every parity. Validation folds only keep rows where this column is True, so the best epoch,
+  #aggregation, TTA and threshold are chosen on them (leave out to validate on all rows).
+  #Not the same as val_subgroups, which only logs extra validation metrics
+  val_subgroup: parity_0
+  #Test folds only keep rows where this column is True (leave out to test on all rows)
+  test_subgroup: parity_0
 
 tasks:
   preterm:
