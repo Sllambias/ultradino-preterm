@@ -3,6 +3,11 @@
 """
 train.py on EHR_extract population parquets (e.g. preterm_P1_img_v7) instead of the preprocess.py dataset.
 
+The train and test parquets are pooled and split into data.folds folds by mother.
+Model `fold` tests on fold `fold`, validates on fold `fold + 1` and trains on the other folds.
+The test predictions of all models are concatenated into predictions/predictions_<cutoff>.parquet,
+so every child is test data exactly once, and GA_<cutoff>.txt reports the metrics of that concatenation.
+
 Usage: python train_ehr_extract.py confs/training_confs/ehr_extract_P1_img_v7.yaml
 """
 #%%Imports
@@ -24,7 +29,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torchmetrics")
 
 #%%Load config and setup logger(s)
 parser = argparse.ArgumentParser()
-parser.add_argument("config", help="Training config with the EHR_extract parquets in data.train_path/test_path")
+parser.add_argument("config", help="Training config with the EHR_extract parquets in data.train_path/test_path, which are pooled")
 args = parser.parse_args()
 
 cfg = load_config(args.config)

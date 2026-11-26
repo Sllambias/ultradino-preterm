@@ -4,7 +4,8 @@ info:
   output_dir: ~/repos/ultradino-preterm/outputs #Run is saved in <output_dir>/<name>_<cutoff>_<timestamp>/
 
 data:
-  # EHR_extract preterm_img_v7 outputs (all parities, with a parity_0 column), split on CPR_MOR by its holdout_csv
+  # EHR_extract preterm_img_v7 outputs (all parities, with a parity_0 column).
+  # Both parquets are pooled and split into data.folds folds by CPR_MOR, so every row is test data for one fold model
   train_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_img_v7/preterm_img_v7_population_train.parquet
   test_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_img_v7/preterm_img_v7_population_test.parquet
   # NO_OCR_FILE_PATH is joined onto this folder (absolute paths are kept as they are)
@@ -21,7 +22,7 @@ data:
   #Rows where these columns are True are filtered out before training.
   #c-section_acute and induced_acute are always filtered out below the highest cutoff (no-MP rule), so don't list them here
   remove: [multi_birth]
-  #Training uses every parity. Test folds only keep rows where this column is True (leave out to test on all rows)
+  #Training and validation use every parity. Test folds only keep rows where this column is True (leave out to test on all rows)
   test_subgroup: parity_0
   #Validation metrics are logged on all rows and again on the rows where each of these columns is True.
   #The best epoch and the test threshold are still chosen on all rows

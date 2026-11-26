@@ -4,7 +4,8 @@ info:
   output_dir: ~/repos/ultradino-preterm/outputs #Run is saved in <output_dir>/<name>_<cutoff>_<timestamp>/
 
 data:
-  # EHR_extract preterm_P1_img_v7 outputs, split on CPR_MOR by its holdout_csv (EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_P1_img_v7)
+  # EHR_extract preterm_P1_img_v7 outputs (EHR_EXTRACT_OUTPUTS/populations/preterm/preterm_P1_img_v7).
+  # Both parquets are pooled and split into data.folds folds by CPR_MOR, so every row is test data for one fold model
   train_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_train.parquet
   test_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract_outputs/populations/preterm/preterm_P1_img_v7/preterm_P1_img_v7_population_test.parquet
   # NO_OCR_FILE_PATH is joined onto this folder (absolute paths are kept as they are)

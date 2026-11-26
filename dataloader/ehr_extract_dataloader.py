@@ -195,7 +195,11 @@ class EHRExtractDataset(PreTermDataset):
 
 
 class EHRExtractDataSplits:
-    """DataSplits on EHR_extract's train and test parquets: CV folds over test, train always in training."""
+    """CV folds over EHR_extract's train and test parquets together.
+
+    Model `fold` tests on fold `fold`, validates on fold `fold + 1` and trains on the rest,
+    so every row is in the test fold of exactly one model.
+    """
 
     def __init__(self, cfg, save_path):
         self.oversample_ratio = cfg.data.oversample_ratio
@@ -204,33 +208,30 @@ class EHRExtractDataSplits:
         self.seed = cfg.data.seed
         self.test_subgroup = cfg.data.get("test_subgroup")
 
-        if self.folds < 2:
-            raise Exception(f"{self.folds} folds set, must be atleast 2")
+        if self.folds < 3:
+            raise Exception(f"{self.folds} folds set, must be atleast 3 (one test, one validation and one training fold)")
 
-        if self.folds == 2:
-            print('Warning: Only 2 folds selected, one fold will be used for validation and one for testing')
-
-        test_df = load_population(cfg.data.test_path, cfg.data.image_root)
         train_df = load_population(cfg.data.train_path, cfg.data.image_root)
+        test_df = load_population(cfg.data.test_path, cfg.data.image_root)
+        df = pl.concat([train_df, test_df], how="vertical_relaxed")
+        print(f"Pooled {len(train_df):,} train and {len(test_df):,} test rows into {len(df):,} rows")
 
-        if self.test_subgroup is not None and self.test_subgroup not in test_df.columns:
-            raise ValueError(f"{cfg.data.test_path} has no column {self.test_subgroup} for data.test_subgroup")
+        if self.test_subgroup is not None and self.test_subgroup not in df.columns:
+            raise ValueError(f"The populations have no column {self.test_subgroup} for data.test_subgroup")
 
         # Filtered before folds and oversampling, so both only see rows that are trained and evaluated on
-        test_df = remove_excluded(test_df, cfg, "test")
-        train_df = remove_excluded(train_df, cfg, "train")
+        df = remove_excluded(df, cfg, "train + test")
 
-        self.train_df = train_df.with_columns(pl.lit(-1, dtype=pl.Int64).alias("fold"))
-        self.test_df = assign_folds(test_df, self.folds, self.seed)
+        self.df = assign_folds(df, self.folds, self.seed)
 
         # Check that every mother is in exactly one fold
-        assert (self.test_df.group_by("CPR_MOR").agg(pl.col("fold").n_unique().alias("n_folds"))
+        assert (self.df.group_by("CPR_MOR").agg(pl.col("fold").n_unique().alias("n_folds"))
                 .filter(pl.col("n_folds") != 1).height == 0)
 
         self.save_distributions(save_path)
 
     def save_distributions(self, save_path):
-        df = self.test_df.unique("CPR_BARN")
+        df = self.df.unique("CPR_BARN")
 
         distributions = []
 
@@ -252,7 +253,7 @@ class EHRExtractDataSplits:
         fold_counts.write_csv(save_path + 'GA_distribution.csv')
 
         for fold in range(self.folds):
-            test_df_fold = self.test_df.filter(pl.col("fold") == fold)
+            test_df_fold = self.df.filter(pl.col("fold") == fold)
 
             test_df_fold.write_parquet(save_path + f"test_df_fold_{fold}.parquet")
 
@@ -260,12 +261,11 @@ class EHRExtractDataSplits:
         if not 0 <= fold < self.folds:
             raise Exception(f"Data only contains {self.folds} folds")
 
-        test_df = self.test_df.filter(pl.col('fold') == fold)
+        test_df = self.df.filter(pl.col('fold') == fold)
         val_fold = (fold + 1) % self.folds
-        val_df = self.test_df.filter(pl.col('fold') == val_fold)
+        val_df = self.df.filter(pl.col('fold') == val_fold)
 
-        train_df = self.test_df.filter((pl.col('fold') != fold) & (pl.col('fold') != val_fold))
-        train_df = pl.concat([self.train_df, train_df])
+        train_df = self.df.filter((pl.col('fold') != fold) & (pl.col('fold') != val_fold))
 
         # Only the test fold is restricted. The rows it drops belong to its mothers, so they don't move to training
         if self.test_subgroup is not None:
@@ -274,10 +274,13 @@ class EHRExtractDataSplits:
         for col in ["CPR_MOR", "CPR_BARN", "FILE_PATH"]:
             overlap_test = (set(train_df[col].drop_nulls().unique()) & set(test_df[col].drop_nulls().unique()))
             overlap_val = (set(train_df[col].drop_nulls().unique()) & set(val_df[col].drop_nulls().unique()))
+            overlap_val_test = (set(val_df[col].drop_nulls().unique()) & set(test_df[col].drop_nulls().unique()))
             if overlap_test:
                 raise ValueError(f"{col}: contains {len(overlap_test)} overlaps in test/train. \n Examples: {list(overlap_test)[:10]}")
             if overlap_val:
                 raise ValueError(f"{col}: contains {len(overlap_val)} overlaps in val/train. \n Examples: {list(overlap_val)[:10]}")
+            if overlap_val_test:
+                raise ValueError(f"{col}: contains {len(overlap_val_test)} overlaps in val/test. \n Examples: {list(overlap_val_test)[:10]}")
 
         if self.oversample_ratio != 0:
             positives = train_df.filter(pl.col("GA") // 7 < self.highest_GA)
