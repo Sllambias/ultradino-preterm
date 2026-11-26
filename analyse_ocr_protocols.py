@@ -180,44 +180,147 @@ def evaluate_images(images, n_bootstrap, rng):
     return result
 
 
-def sample_images(images, n, rng):
-    """At most n random images per child, with every fold and TTA flip of the kept images."""
-    # Sorted so that the same seed draws the same images
-    child_images = images.select(["CPR_CHILD", "image_path"]).unique().sort(["CPR_CHILD", "image_path"])
-    child_images = child_images.with_columns(pl.Series("order", rng.random(child_images.height)))
-    kept = child_images.filter(pl.col("order").rank(method="ordinal").over("CPR_CHILD") <= n)
-    return images.join(kept.select(["CPR_CHILD", "image_path"]), on=["CPR_CHILD", "image_path"], how="semi")
+def sorted_mean(preds, starts, counts):
+    """Mean of each child's predictions."""
+    return np.add.reduceat(preds, starts) / counts
+
+
+def sorted_max(preds, starts, counts):
+    """Largest of each child's predictions, which is its last as they are sorted."""
+    return preds[starts + counts - 1]
+
+
+def sorted_quantile(preds, starts, counts):
+    """0.75 quantile of each child's predictions, taking the nearest one as polars does."""
+    nearest = np.floor(0.75 * (counts - 1) + 0.5).astype(np.int64)
+    return preds[starts + nearest]
+
+
+def sorted_aggregation_functions():
+    """aggregation_functions() of utils/metrics.py in numpy, for predictions sorted within each child."""
+    return {"avg": sorted_mean, "max": sorted_max, "quantile": sorted_quantile}
+
+
+def auc(scores, labels):
+    """ROC AUC as the chance that a preterm child scores above a term child, ties counting half as in torchmetrics."""
+    term = np.sort(scores[~labels])
+    preterm = scores[labels]
+    term_below = np.searchsorted(term, preterm, side="left")
+    term_not_above = np.searchsorted(term, preterm, side="right")
+    return (term_below + term_not_above).sum() / (2 * len(preterm) * len(term))
+
+
+class FoldImages:
+    """One fold's image predictions as arrays, to rebuild its child predictions from a subset of the images."""
+
+    def __init__(self, fold_images, image_table):
+        settings = fold_images.row(0, named=True)
+        self.aggregate = sorted_aggregation_functions()[settings["agg"]]
+        self.threshold = settings["threshold"]
+
+        # The rows that patient_predictions aggregates, sorted by child and prediction
+        if settings["tta"] == "no-tta":
+            fold_images = fold_images.filter(pl.col("img_path").str.ends_with("_1"))
+        rows = fold_images.join(image_table, on=["CPR_CHILD", "image_path"]).sort(["child", "preds"])
+        if rows["image"].n_unique() != image_table.height:
+            raise ValueError(f"{settings['model']} has no {settings['tta']} predictions for some of the images")
+        self.child = rows["child"].cast(pl.Int64).to_numpy()
+        self.image = rows["image"].cast(pl.Int64).to_numpy()
+        self.preds = rows["preds"].to_numpy()
+
+        n_children = image_table["child"].n_unique()
+        self.all_images = self.first_children(np.ones(image_table.height, dtype=bool), n_children)
+
+    def first_children(self, keep_image, n_children):
+        """preds_normalized of children 0 to n_children - 1 from their kept images."""
+        end = np.searchsorted(self.child, n_children)
+        keep = keep_image[self.image[:end]]
+        child = self.child[:end][keep]
+        preds = self.preds[:end][keep]
+
+        counts = np.bincount(child, minlength=n_children)
+        starts = np.cumsum(counts) - counts
+        aggregated = self.aggregate(preds, starts, counts)
+        return np.where(
+            aggregated < self.threshold,
+            0.5 * aggregated / self.threshold,
+            0.5 + 0.5 * (aggregated - self.threshold) / (1 - self.threshold),
+        )
+
+    def child_predictions(self, keep_image, n_changed):
+        """preds_normalized of every child, rebuilding only the first n_changed children from their kept images."""
+        predictions = self.all_images.copy()
+        if n_changed > 0:
+            predictions[:n_changed] = self.first_children(keep_image, n_changed)
+        return predictions
 
 
 def evaluate_n_images(images, max_images, n_draws, rng):
-    """Ensemble AUC when each child keeps at most n random images, for n = 1 to max_images, over n_draws draws."""
-    images_per_child = images.group_by("CPR_CHILD").agg(pl.col("image_path").n_unique().alias("n"))["n"]
+    """Ensemble AUC when each child keeps at most n random images, for n = 1 to max_images, over n_draws draws.
+
+    Each draw shuffles every child's images once and keeps the first n for every n.
+    """
+    # Children with the most images first, so the children with more than n images are the first ones
+    children = (
+        images.group_by("CPR_CHILD")
+        .agg([pl.col("image_path").n_unique().alias("n"), pl.col("label").first()])
+        .sort(["n", "CPR_CHILD"], descending=[True, False])
+        .with_row_index("child")
+    )
+    image_table = (
+        images.select(["CPR_CHILD", "image_path"])
+        .unique()
+        .join(children.select(["CPR_CHILD", "child"]), on="CPR_CHILD")
+        .sort(["child", "image_path"])
+        .with_row_index("image")
+    )
+    folds = []
+    for model_name in sorted(images["model"].unique()):
+        folds.append(FoldImages(images.filter(pl.col("model") == model_name), image_table))
+
+    images_per_child = children["n"].to_numpy()
+    labels = children["label"].cast(pl.Boolean).to_numpy()
     if max_images is None:
-        max_images = images_per_child.max()
+        max_images = int(images_per_child.max())
     else:
-        max_images = min(max_images, images_per_child.max())
+        max_images = min(max_images, int(images_per_child.max()))
+
+    ensemble_aucs = np.zeros((max_images, n_draws))
+    fold_aucs = np.zeros((max_images, n_draws))
+    for draw in range(n_draws):
+        order = (
+            image_table.with_columns(pl.Series("key", rng.random(image_table.height)))
+            .select(pl.col("key").rank(method="ordinal").over("child"))["key"]
+            .to_numpy()
+        )
+        for n in range(1, max_images + 1):
+            keep_image = order <= n
+            # Children with at most n images keep all of them, as with every image
+            n_changed = int((images_per_child > n).sum())
+            fold_predictions = []
+            for fold in folds:
+                fold_predictions.append(fold.child_predictions(keep_image, n_changed))
+            ensemble = np.mean(fold_predictions, axis=0)
+
+            ensemble_aucs[n - 1, draw] = auc(ensemble, labels)
+            fold_aucs[n - 1, draw] = np.mean([auc(predictions, labels) for predictions in fold_predictions])
 
     rows = []
     for n in range(1, max_images + 1):
-        aucs = []
-        fold_aucs = []
-        for _ in range(n_draws):
-            result = evaluate_images(sample_images(images, n, rng), 0, rng)
-            aucs.append(result["AUC"])
-            fold_aucs.append(result["fold_AUC_mean"])
+        aucs = ensemble_aucs[n - 1]
         rows.append(
             {
                 "n_images": n,
-                "children": result["children"],
+                "children": children.height,
                 "children_with_n": int((images_per_child >= n).sum()),
-                "preterm": result["preterm"],
-                "images": result["images"],
-                "folds": result["folds"],
+                "preterm": int(labels.sum()),
+                "images": int(np.minimum(images_per_child, n).sum()),
+                "folds": len(folds),
                 "AUC_mean": round(float(np.mean(aucs)), 4),
                 "AUC_sd": round(float(np.std(aucs)), 4),
                 "AUC_min": round(float(np.min(aucs)), 4),
                 "AUC_max": round(float(np.max(aucs)), 4),
-                "fold_AUC_mean": round(float(np.mean(fold_aucs)), 4),
+                "fold_AUC_mean": round(float(np.mean(fold_aucs[n - 1])), 4),
             }
         )
     return rows
