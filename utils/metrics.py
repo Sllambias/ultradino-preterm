@@ -84,6 +84,16 @@ def evaluate_predictions(df, n_bootstrap, rng):
     return result
 
 
+def confusion_counts(df):
+    """True and false positives and negatives of the call at the validation threshold (preds_binary)."""
+    predicted = pl.col("preds_binary") == 1
+    preterm = pl.col("label").cast(pl.Boolean)
+    return df.select([(predicted & preterm).sum().alias("TP"),
+                      (predicted & ~preterm).sum().alias("FP"),
+                      (~predicted & ~preterm).sum().alias("TN"),
+                      (~predicted & preterm).sum().alias("FN")]).row(0, named=True)
+
+
 def ensemble_predictions(folds_df):
     """Mean of the folds' preds_normalized per child, which puts every fold's threshold at 0.5."""
     return (folds_df.group_by("CPR_CHILD").agg([pl.col("preds_normalized").mean(),

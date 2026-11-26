@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from dataloader.ehr_extract_dataloader import (EHRExtractDataset, ehr_extract_collate_fn, load_population,
                                                remove_excluded)
-from utils.metrics import ensemble_predictions, evaluate_predictions, patient_predictions
+from utils.metrics import confusion_counts, ensemble_predictions, evaluate_predictions, patient_predictions
 from utils.model_utils import model_from_conf, mixed_precision
 
 import warnings
@@ -180,12 +180,16 @@ for cutoff in cfg.tasks.preterm.cutoffs:
                 n_bootstrap = test_cfg.n_bootstrap
             else:
                 n_bootstrap = 0
-            rows.append({"group": group, "model": model_name, **evaluate_predictions(model_df, n_bootstrap, rng)})
+            rows.append({"group": group,
+                         "model": model_name,
+                         **evaluate_predictions(model_df, n_bootstrap, rng),
+                         **confusion_counts(model_df)})
 
     metrics_df = pl.DataFrame(rows)
     metrics_df.write_csv(os.path.join(save_path, f"metrics_{cutoff}.csv"))
     print(f"\nGA {cutoff} on {test_cfg.name}, ensemble of folds {folds}:")
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200):
-        print(metrics_df.select(["group", "model", "children", "preterm", "AUC", "SensAtSpec", "Sensitivity", "Specificity"]))
+        print(metrics_df.select(["group", "model", "children", "preterm", "TP", "FP", "TN", "FN",
+                                 "AUC", "SensAtSpec", "Sensitivity", "Specificity"]))
 
 print(f"\nPredictions and metrics written to {save_path}")

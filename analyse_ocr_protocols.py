@@ -12,11 +12,15 @@ predictions are used, i.e. those that had finished training when test_ehr_extrac
   - "all 4 protocols": only children with images of all 4 protocols, so the combinations differ only in which
     images are used. The Shapley values split this view's AUC above chance (0.5) between the 4 protocols.
 
+For comparison, the ensemble AUC by number of images: each child keeps at most n of its images (with or without a
+protocol), drawn at random --n-draws times, for n = 1, 2, ... in both views. It shows how much of a combination's
+AUC could come from simply having more images.
+
 The OCR rows are matched to the absolute image paths that the models were tested on (img_path in the image
 predictions, without its TTA suffix).
 
 Usage: python analyse_ocr_protocols.py <run_dir>/<test name> <us-ocr results.csv> [--ocr-path-column file_path]
-       [--ocr-path-root <folder joined onto the OCR paths>]
+       [--ocr-path-root <folder joined onto the OCR paths>] [--n-draws 20] [--max-images <n>]
 """
 
 # %%Imports
@@ -176,6 +180,49 @@ def evaluate_images(images, n_bootstrap, rng):
     return result
 
 
+def sample_images(images, n, rng):
+    """At most n random images per child, with every fold and TTA flip of the kept images."""
+    # Sorted so that the same seed draws the same images
+    child_images = images.select(["CPR_CHILD", "image_path"]).unique().sort(["CPR_CHILD", "image_path"])
+    child_images = child_images.with_columns(pl.Series("order", rng.random(child_images.height)))
+    kept = child_images.filter(pl.col("order").rank(method="ordinal").over("CPR_CHILD") <= n)
+    return images.join(kept.select(["CPR_CHILD", "image_path"]), on=["CPR_CHILD", "image_path"], how="semi")
+
+
+def evaluate_n_images(images, max_images, n_draws, rng):
+    """Ensemble AUC when each child keeps at most n random images, for n = 1 to max_images, over n_draws draws."""
+    images_per_child = images.group_by("CPR_CHILD").agg(pl.col("image_path").n_unique().alias("n"))["n"]
+    if max_images is None:
+        max_images = images_per_child.max()
+    else:
+        max_images = min(max_images, images_per_child.max())
+
+    rows = []
+    for n in range(1, max_images + 1):
+        aucs = []
+        fold_aucs = []
+        for _ in range(n_draws):
+            result = evaluate_images(sample_images(images, n, rng), 0, rng)
+            aucs.append(result["AUC"])
+            fold_aucs.append(result["fold_AUC_mean"])
+        rows.append(
+            {
+                "n_images": n,
+                "children": result["children"],
+                "children_with_n": int((images_per_child >= n).sum()),
+                "preterm": result["preterm"],
+                "images": result["images"],
+                "folds": result["folds"],
+                "AUC_mean": round(float(np.mean(aucs)), 4),
+                "AUC_sd": round(float(np.std(aucs)), 4),
+                "AUC_min": round(float(np.min(aucs)), 4),
+                "AUC_max": round(float(np.max(aucs)), 4),
+                "fold_AUC_mean": round(float(np.mean(fold_aucs)), 4),
+            }
+        )
+    return rows
+
+
 def shapley_values(aucs, protocols):
     """Each protocol's Shapley share of the AUC above chance, from the AUC of every combination (none = 0.5)."""
     n = len(protocols)
@@ -223,6 +270,17 @@ parser.add_argument(
     type=int,
     default=1000,
     help="Bootstrap resamples for the ensemble's 95%% CIs",
+)
+parser.add_argument(
+    "--n-draws",
+    type=int,
+    default=20,
+    help="Random draws of each child's images for the AUC by number of images",
+)
+parser.add_argument(
+    "--max-images",
+    type=int,
+    help="Largest number of images per child for the AUC by number of images. Default: the most any child has",
 )
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()
@@ -359,5 +417,25 @@ for path in prediction_files:
                 f"(sums to {aucs[frozenset(protocols)]:.4f} - 0.5)"
             )
             print(shapley_df)
+
+    # %%AUC by the number of images per child, drawn from all of a child's images
+    draw_rng = np.random.default_rng(args.seed)
+    n_image_rows = []
+    for view, view_images in views.items():
+        if view_images.is_empty():
+            continue
+        for row in evaluate_n_images(view_images, args.max_images, args.n_draws, draw_rng):
+            n_image_rows.append({"view": view, **row})
+
+    n_images_df = pl.DataFrame(n_image_rows)
+    n_images_df.write_csv(os.path.join(save_path, f"n_images_{suffix}.csv"))
+
+    with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=250):
+        for view in views:
+            print(
+                f"\n{view}: ensemble AUC with at most n random images per child, over {args.n_draws} draws "
+                f"(children_with_n have at least n images)"
+            )
+            print(n_images_df.filter(pl.col("view") == view).drop("view"))
 
 print(f"\nWritten to {save_path}")
