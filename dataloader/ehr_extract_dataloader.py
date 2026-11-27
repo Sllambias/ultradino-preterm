@@ -74,10 +74,32 @@ def ehr_extract_collate_fn(batch):
     return sample
 
 
-def remove_excluded(df, cfg, name):
-    """Drop planned preterm births, rows flagged in data.remove and rows not flagged in data.keep, printing the counts."""
-    keep = list(cfg.data.get("keep", []))
-    missing = [var for var in list(cfg.data.remove) + keep if var not in df.columns]
+def test_group_columns():
+    """Columns that test results are split by (in test_groups) instead of leaving rows out."""
+    return ["multi_birth", "parity_0"]
+
+
+def test_groups():
+    """Groups that test results are split by: without or with multi-births, times parity 0 or every parity.
+
+    As in data.remove and data.keep, a null multi_birth counts as not a multi-birth and a null parity_0 as not parity 0.
+    """
+    no_multi_birth = ~pl.col("multi_birth").cast(pl.Boolean).fill_null(False)
+    parity_0 = pl.col("parity_0").cast(pl.Boolean).fill_null(False)
+    return {"no_multi_birth_parity_0": no_multi_birth & parity_0,
+            "no_multi_birth_all_parities": no_multi_birth,
+            "with_multi_birth_parity_0": parity_0,
+            "all": pl.lit(True)}
+
+
+def remove_excluded(df, cfg, name, split_columns=()):
+    """Drop planned preterm births, rows flagged in data.remove and rows not flagged in data.keep, printing the counts.
+
+    Columns in split_columns are left out of data.remove and data.keep, for test results that are split by them.
+    """
+    remove = [var for var in cfg.data.remove if var not in split_columns]
+    keep = [var for var in cfg.data.get("keep", []) if var not in split_columns]
+    missing = [var for var in remove + keep if var not in df.columns]
     if missing:
         raise ValueError(f"The {name} population has no columns {missing} from data.remove or data.keep")
 
@@ -86,7 +108,7 @@ def remove_excluded(df, cfg, name):
     cutoff = max(cfg.tasks.preterm.cutoffs)
     planned = pl.col("c-section_acute").fill_null(False) | pl.col("induced_acute").fill_null(False)
     reasons = {f"planned birth at GA < {cutoff} weeks": (pl.col("GA") // 7 < cutoff) & planned}
-    for var in cfg.data.remove:
+    for var in remove:
         reasons[var] = pl.col(var).cast(pl.Boolean).fill_null(False)
     # A null in a data.keep column counts as False, so the row is left out
     for var in keep:
@@ -94,7 +116,7 @@ def remove_excluded(df, cfg, name):
 
     kept = df.filter(~pl.any_horizontal(list(reasons.values())))
 
-    print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks, data.remove {list(cfg.data.remove)} "
+    print(f"\n{name}: leaving out planned births at GA < {cutoff} weeks, data.remove {remove} "
           f"and rows not True in data.keep {keep}")
     print_counts(population_counts(df, cutoff), population_counts(kept, cutoff))
     print("  children matching each reason (a child can match several):")

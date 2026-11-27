@@ -4,6 +4,10 @@
 Test the fold models of a train_ehr_extract.py run on another EHR_extract population, e.g. prospective_img_v1.
 Only folds that have finished training are used, so a run can be tested while its last folds still train.
 
+Multi-births and every parity are tested, also when the run left them out with data.remove or data.keep, and the
+metrics are split by them (test_groups in dataloader/ehr_extract_dataloader.py): no multi-births and parity 0, no
+multi-births and every parity, multi-births kept and parity 0, and every child.
+
 Usage: python test_ehr_extract.py <run_dir> confs/test_confs/prospective_img_v1.yaml
 """
 #%%Imports
@@ -18,7 +22,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataloader.ehr_extract_dataloader import (EHRExtractDataset, ehr_extract_collate_fn, load_population,
-                                               remove_excluded)
+                                               remove_excluded, test_group_columns, test_groups)
 from utils.metrics import confusion_counts, ensemble_predictions, evaluate_predictions, patient_predictions
 from utils.model_utils import model_from_conf, mixed_precision
 
@@ -100,14 +104,16 @@ save_path = os.path.join(run_dir, test_cfg.name)
 os.makedirs(save_path, exist_ok=True)
 
 df = load_population(test_cfg.population_path, cfg.data.image_root)
-# The same exclusions as in training: the no-MP rule, data.remove and data.keep
-df = remove_excluded(df, cfg, test_cfg.name)
-
-missing = [column for column in test_cfg.subgroups if column not in df.columns]
+missing = [column for column in test_group_columns() if column not in df.columns]
 if missing:
-    raise ValueError(f"{test_cfg.population_path} has no subgroup columns {missing}")
-child_subgroups = (df.group_by("CPR_BARN").agg([pl.col(column).first() for column in test_cfg.subgroups])
-                   .rename({"CPR_BARN": "CPR_CHILD"}))
+    raise ValueError(f"{test_cfg.population_path} has no columns {missing} for the test groups")
+
+# The same exclusions as in training (the no-MP rule, data.remove and data.keep), except multi-births and parity,
+# which the metrics are split by instead
+df = remove_excluded(df, cfg, test_cfg.name, test_group_columns())
+
+child_groups = (df.group_by("CPR_BARN").agg([pl.col(column).first() for column in test_group_columns()])
+                .rename({"CPR_BARN": "CPR_CHILD"}))
 
 # NO_OCR_FILE_PATH of each loaded image, so the image predictions can be joined to other image tables (e.g. us-ocr)
 image_files = df.select(["image_path", "NO_OCR_FILE_PATH"]).unique()
@@ -157,7 +163,7 @@ for cutoff in cfg.tasks.preterm.cutoffs:
     folds_df = pl.concat(fold_dfs)
     ensemble_df = ensemble_predictions(folds_df)
 
-    predictions = pl.concat([folds_df, ensemble_df], how="diagonal").join(child_subgroups, on="CPR_CHILD", how="left")
+    predictions = pl.concat([folds_df, ensemble_df], how="diagonal").join(child_groups, on="CPR_CHILD", how="left")
     predictions.write_parquet(os.path.join(save_path, f"predictions_{cutoff}.parquet"))
 
     # Every image and TTA flip of every fold, with each fold's settings, e.g. for analyse_ocr_protocols.py
@@ -165,15 +171,12 @@ for cutoff in cfg.tasks.preterm.cutoffs:
                          .with_columns(pl.col("img_path").str.replace(r"_\d+$", "").alias("image_path"))
                          .join(image_files, on="image_path", how="left", validate="m:1")
                          .drop("image_path")
-                         .join(child_subgroups, on="CPR_CHILD", how="left"))
+                         .join(child_groups, on="CPR_CHILD", how="left"))
     image_predictions.write_parquet(os.path.join(save_path, f"image_predictions_{cutoff}.parquet"))
 
-    # Metrics on every child and on each subgroup; bootstrap CIs for the ensemble only
+    # Metrics on each test group; bootstrap CIs for the ensemble only
     rows = []
-    groups = {"all": pl.lit(True)}
-    for column in test_cfg.subgroups:
-        groups[column] = pl.col(column)
-    for group, condition in groups.items():
+    for group, condition in test_groups().items():
         for model_name in [f"fold_{fold}" for fold in folds] + ["ensemble"]:
             model_df = predictions.filter((pl.col("model") == model_name) & condition)
             if model_name == "ensemble":

@@ -20,6 +20,10 @@ With --auc-by-n-images, also the ensemble AUC by number of images: each child ke
 or without a protocol), drawn at random --n-draws times, for n = 1, 2, ... in both views. It shows how much of a
 combination's AUC could come from simply having more images.
 
+All of this is done for each test group of test_ehr_extract.py (test_groups in dataloader/ehr_extract_dataloader.py):
+no multi-births and parity 0, no multi-births and every parity, multi-births kept and parity 0, and every child. The
+CSVs have a group column.
+
 The OCR and PN_CompleteV1 rows are matched to the absolute image paths that the models were tested on (img_path in
 the image predictions, without its TTA suffix).
 
@@ -42,6 +46,7 @@ import numpy as np
 import polars as pl
 import torch
 
+from dataloader.ehr_extract_dataloader import test_group_columns, test_groups
 from utils.metrics import (
     binary_metrics,
     ensemble_predictions,
@@ -405,6 +410,79 @@ def shapley_values(aucs, protocols):
     return values
 
 
+def protocol_views(images, protocols):
+    """The images of every child, and of only the children with images of all 4 protocols."""
+    complete = (
+        images.drop_nulls("protocol")
+        .group_by("CPR_CHILD")
+        .agg(pl.col("protocol").n_unique().alias("n"))
+        .filter(pl.col("n") == len(protocols))["CPR_CHILD"]
+    )
+    return {
+        "with 1-4 protocols": images,
+        "with all 4 protocols": images.filter(
+            pl.col("CPR_CHILD").is_in(complete.implode())
+        ),
+    }
+
+
+def evaluate_combinations(views, protocols, n_bootstrap, rng):
+    """Metrics of all images, the PN_CompleteV1 cervix images and every protocol combination in each view, and the
+    AUC of each combination in the view with all 4 protocols, for the Shapley values."""
+    rows = []
+    aucs = {}
+    for view, view_images in views.items():
+        if view_images.is_empty():
+            print(f"No children in the view '{view}'")
+            continue
+
+        # Reference: all of the children's images, also those without a cervix protocol
+        rows.append(
+            {
+                "view": view,
+                "combination": "all images",
+                "n_protocols": None,
+                **evaluate_images(view_images, n_bootstrap, rng),
+            }
+        )
+
+        # The images that PN_CompleteV1 predicts as cervix, whatever their protocol
+        pn_images = view_images.filter(pl.col("pn_cervix"))
+        if pn_images.is_empty():
+            print(
+                f"No images predicted as cervix by PN_CompleteV1 in the view '{view}'"
+            )
+        else:
+            rows.append(
+                {
+                    "view": view,
+                    "combination": "PN_CompleteV1 cervix",
+                    "n_protocols": None,
+                    **evaluate_images(pn_images, n_bootstrap, rng),
+                }
+            )
+
+        for size in range(1, len(protocols) + 1):
+            for combination in itertools.combinations(protocols, size):
+                combination_images = view_images.filter(
+                    pl.col("protocol").is_in(list(combination))
+                )
+                if combination_images.is_empty():
+                    continue
+                result = evaluate_images(combination_images, n_bootstrap, rng)
+                rows.append(
+                    {
+                        "view": view,
+                        "combination": " + ".join(combination),
+                        "n_protocols": size,
+                        **result,
+                    }
+                )
+                if view == "with all 4 protocols":
+                    aucs[frozenset(combination)] = result["AUC"]
+    return rows, aucs
+
+
 # %%Load the test predictions and the protocols
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -424,7 +502,7 @@ parser.add_argument(
     help="Folder joined onto every path in --ocr-path-column before matching, when the OCR paths are relative",
 )
 parser.add_argument(
-    "--pn-predictions",
+    "--pn-predictionAdas",
     default="/storage/archive/UCPH/DeepFetal/ultrasound/foundation_model_path_update/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
     help="PN_CompleteV1 classifier outputs CSV with the predicted class (max_pred) of each image",
 )
@@ -443,9 +521,6 @@ parser.add_argument(
     type=int,
     default=12,
     help="max_pred of cervix in PN_CompleteV1 (Cervix in its configs/label_mapping/class_label_map.yaml)",
-)
-parser.add_argument(
-    "--subgroup", help="Only use children where this column is True, e.g. parity_0"
 )
 parser.add_argument(
     "--n-bootstrap",
@@ -491,8 +566,13 @@ if not prediction_files:
 for path in prediction_files:
     cutoff = re.search(r"image_predictions_(\d+)\.parquet", path).group(1)
     images = pl.read_parquet(path)
-    if args.subgroup is not None:
-        images = images.filter(pl.col(args.subgroup))
+    missing = [
+        column for column in test_group_columns() if column not in images.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"{path} has no columns {missing} for the test groups; rerun test_ehr_extract.py"
+        )
 
     # img_path is the absolute path of the loaded image with the TTA flip appended, e.g. <image>.png_1
     loaded_paths = images["img_path"].str.replace(r"_\d+$", "").to_list()
@@ -505,9 +585,7 @@ for path in prediction_files:
     ].n_unique()
     images = images.join(pn, on="image_path", how="left")
     n_in_pn = images.filter(pl.col("pn_cervix").is_not_null())["image_path"].n_unique()
-    print(
-        f"\n========== GA {cutoff}{' (' + args.subgroup + ')' if args.subgroup else ''} =========="
-    )
+    print(f"\n========== GA {cutoff} ==========")
     # test_ehr_extract.py only tests the folds that had finished training
     fold_names = sorted(images["model"].unique().to_list())
     print(
@@ -526,137 +604,110 @@ for path in prediction_files:
         )
     # Images that PN_CompleteV1 has no prediction for count as not cervix
     images = images.with_columns(pl.col("pn_cervix").fill_null(False))
-    print_coverage(images)
 
-    # Children with images of all 4 protocols, for the view where only the images change
-    complete = (
-        images.drop_nulls("protocol")
-        .group_by("CPR_CHILD")
-        .agg(pl.col("protocol").n_unique().alias("n"))
-        .filter(pl.col("n") == len(protocols))["CPR_CHILD"]
-    )
-    views = {
-        "with 1-4 protocols": images,
-        "with all 4 protocols": images.filter(
-            pl.col("CPR_CHILD").is_in(complete.implode())
-        ),
-    }
-
-    # %%Evaluate every combination
-    rng = np.random.default_rng(args.seed)
-    rows = []
-    aucs = {}
-    for view, view_images in views.items():
-        if view_images.is_empty():
-            print(f"No children in the view '{view}'")
-            continue
-
-        # Reference: all of the children's images, also those without a cervix protocol
-        rows.append(
-            {
-                "view": view,
-                "combination": "all images",
-                "n_protocols": None,
-                **evaluate_images(view_images, args.n_bootstrap, rng),
-            }
-        )
-
-        # The images that PN_CompleteV1 predicts as cervix, whatever their protocol
-        pn_images = view_images.filter(pl.col("pn_cervix"))
-        if pn_images.is_empty():
-            print(
-                f"No images predicted as cervix by PN_CompleteV1 in the view '{view}'"
-            )
-        else:
-            rows.append(
-                {
-                    "view": view,
-                    "combination": "PN_CompleteV1 cervix",
-                    "n_protocols": None,
-                    **evaluate_images(pn_images, args.n_bootstrap, rng),
-                }
-            )
-
-        for size in range(1, len(protocols) + 1):
-            for combination in itertools.combinations(protocols, size):
-                combination_images = view_images.filter(
-                    pl.col("protocol").is_in(list(combination))
-                )
-                if combination_images.is_empty():
-                    continue
-                result = evaluate_images(combination_images, args.n_bootstrap, rng)
-                rows.append(
-                    {
-                        "view": view,
-                        "combination": " + ".join(combination),
-                        "n_protocols": size,
-                        **result,
-                    }
-                )
-                if view == "with all 4 protocols":
-                    aucs[frozenset(combination)] = result["AUC"]
-
-    combinations_df = pl.DataFrame(rows)
-    suffix = f"{cutoff}_{args.subgroup}" if args.subgroup else cutoff
-    combinations_df.write_csv(os.path.join(save_path, f"combinations_{suffix}.csv"))
-
-    with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=250, fmt_str_lengths=60):
-        for view in views:
-            print(f"\n{view}: ensemble metrics (95% CI) and the fold models' AUC")
-            print(
-                combinations_df.filter(pl.col("view") == view).select(
-                    [
-                        "combination",
-                        "children",
-                        "preterm",
-                        "images",
-                        "AUC",
-                        "AUC_lower",
-                        "AUC_upper",
-                        "SensAtSpec",
-                        "Sensitivity",
-                        "Specificity",
-                        "fold_AUC_mean",
-                        "fold_AUC_sd",
-                    ]
-                )
-            )
-
-        if len(aucs) == 2 ** len(protocols) - 1:
-            shapley = shapley_values(aucs, protocols)
-            shapley_df = pl.DataFrame(
-                {"protocol": list(shapley), "AUC_contribution": list(shapley.values())}
-            )
-            shapley_df.write_csv(os.path.join(save_path, f"shapley_{suffix}.csv"))
-            print(
-                f"\nShapley contribution of each protocol to the AUC above 0.5, children with all 4 protocols "
-                f"(sums to {aucs[frozenset(protocols)]:.4f} - 0.5)"
-            )
-            print(shapley_df)
-
-    # %%AUC by the number of images per child, drawn from all of a child's images
-    if not args.auc_by_n_images:
-        continue
-
-    draw_rng = np.random.default_rng(args.seed)
+    combination_rows = []
+    shapley_rows = []
     n_image_rows = []
-    for view, view_images in views.items():
-        if view_images.is_empty():
+    for group, condition in test_groups().items():
+        group_images = images.filter(condition)
+        print(f"\n========== GA {cutoff}, {group} ==========")
+        if group_images.is_empty():
+            print("No children in this group")
             continue
-        for row in evaluate_n_images(
-            view_images, args.max_images, args.n_draws, draw_rng
+        print_coverage(group_images)
+        views = protocol_views(group_images, protocols)
+
+        # %%Evaluate every combination
+        # A generator per group, so that a group's CIs do not depend on the groups before it
+        rng = np.random.default_rng(args.seed)
+        rows, aucs = evaluate_combinations(views, protocols, args.n_bootstrap, rng)
+        for row in rows:
+            combination_rows.append({"group": group, **row})
+
+        group_df = pl.DataFrame(rows)
+        with pl.Config(
+            tbl_rows=-1, tbl_cols=-1, tbl_width_chars=250, fmt_str_lengths=60
         ):
-            n_image_rows.append({"view": view, **row})
+            for view in views:
+                print(
+                    f"\n{group}, {view}: ensemble metrics (95% CI) and the fold models' AUC"
+                )
+                print(
+                    group_df.filter(pl.col("view") == view).select(
+                        [
+                            "combination",
+                            "children",
+                            "preterm",
+                            "images",
+                            "AUC",
+                            "AUC_lower",
+                            "AUC_upper",
+                            "SensAtSpec",
+                            "Sensitivity",
+                            "Specificity",
+                            "fold_AUC_mean",
+                            "fold_AUC_sd",
+                        ]
+                    )
+                )
 
-    n_images_df = pl.DataFrame(n_image_rows)
-    n_images_df.write_csv(os.path.join(save_path, f"n_images_{suffix}.csv"))
+            if len(aucs) == 2 ** len(protocols) - 1:
+                shapley = shapley_values(aucs, protocols)
+                for protocol, contribution in shapley.items():
+                    shapley_rows.append(
+                        {
+                            "group": group,
+                            "protocol": protocol,
+                            "AUC_contribution": contribution,
+                        }
+                    )
+                print(
+                    f"\n{group}: Shapley contribution of each protocol to the AUC above 0.5, children with all 4 "
+                    f"protocols (sums to {aucs[frozenset(protocols)]:.4f} - 0.5)"
+                )
+                print(
+                    pl.DataFrame(
+                        {
+                            "protocol": list(shapley),
+                            "AUC_contribution": list(shapley.values()),
+                        }
+                    )
+                )
 
-    with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=250):
-        for view in views:
-            print(
-                f"\n{view}: ensemble AUC with at most n random images per child, over {args.n_draws} draws "
-                f"(children_with_n have at least n images)"
-            )
-            print(n_images_df.filter(pl.col("view") == view).drop("view"))
+        # %%AUC by the number of images per child, drawn from all of a child's images
+        if args.auc_by_n_images:
+            draw_rng = np.random.default_rng(args.seed)
+            group_n_image_rows = []
+            for view, view_images in views.items():
+                if view_images.is_empty():
+                    continue
+                for row in evaluate_n_images(
+                    view_images, args.max_images, args.n_draws, draw_rng
+                ):
+                    group_n_image_rows.append({"view": view, **row})
+                    n_image_rows.append({"group": group, "view": view, **row})
+
+            group_n_images_df = pl.DataFrame(group_n_image_rows)
+            with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=250):
+                for view in views:
+                    print(
+                        f"\n{group}, {view}: ensemble AUC with at most n random images per child, over "
+                        f"{args.n_draws} draws (children_with_n have at least n images)"
+                    )
+                    print(
+                        group_n_images_df.filter(pl.col("view") == view).drop("view")
+                    )
+
+    pl.DataFrame(combination_rows).write_csv(
+        os.path.join(save_path, f"combinations_{cutoff}.csv")
+    )
+    if shapley_rows:
+        pl.DataFrame(shapley_rows).write_csv(
+            os.path.join(save_path, f"shapley_{cutoff}.csv")
+        )
+    if n_image_rows:
+        pl.DataFrame(n_image_rows).write_csv(
+            os.path.join(save_path, f"n_images_{cutoff}.csv")
+        )
 
 print(f"\nWritten to {save_path}")

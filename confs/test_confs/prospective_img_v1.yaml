@@ -6,8 +6,7 @@ population_path: /projects/users/data/UCPH/DeepFetal/projects/common/EHR_extract
 #NO_OCR_FILE_PATH is joined onto this folder (absolute paths are kept as they are). Check where the prospective PNGs are
 image_root: /projects/users/data/UCPH/DeepFetal/ultrasound/PNG_PROCESSED_NO_OCR_TMP_DIR
 
-#Metrics are reported on every child and again on the children where each of these columns is True
-subgroups: [parity_0]
+#Multi-births and every parity are tested; the metrics are split by test_groups() in dataloader/ehr_extract_dataloader.py
 
 workers: 32
 n_bootstrap: 10000 #Bootstrap resamples for the ensemble's 95% CIs
