@@ -1,5 +1,5 @@
 info:
-  name: ehr_extract_pre26_img_v7
+  name: ehr_extract_pre26_highconf_img_v7
   timestamp: ${now:%Y-%m-%d_%H-%M-%S} #${now:<strftime pattern>} is the start time of the run
   output_dir: ~/repos/ultradino-preterm/outputs #Run is saved in <output_dir>/<name>_<cutoff>_<timestamp>/
 
