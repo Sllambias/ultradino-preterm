@@ -502,7 +502,7 @@ parser.add_argument(
     help="Folder joined onto every path in --ocr-path-column before matching, when the OCR paths are relative",
 )
 parser.add_argument(
-    "--pn-prediction",
+    "--pn-predictions",
     default="/storage/archive/UCPH/DeepFetal/ultrasound/foundation_model_path_update/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
     help="PN_CompleteV1 classifier outputs CSV with the predicted class (max_pred) of each image",
 )
