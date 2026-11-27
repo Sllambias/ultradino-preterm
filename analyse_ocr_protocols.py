@@ -85,9 +85,15 @@ def load_protocols(ocr_path, path_column, path_root):
     # TEMP fix: the OCR paths use an old folder name. Remove when us-ocr is rerun on the current folders
     old_folder = "RegionH_pseudonymized"
     new_folder = "RegionH/regionH/2026"
-    n_renamed = ocr.filter(pl.col(path_column).str.contains(old_folder, literal=True)).height
-    print(f"TEMP fix: replaced {old_folder} with {new_folder} in {n_renamed:,} of {ocr.height:,} OCR paths")
-    ocr = ocr.with_columns(pl.col(path_column).str.replace_all(old_folder, new_folder, literal=True))
+    n_renamed = ocr.filter(
+        pl.col(path_column).str.contains(old_folder, literal=True)
+    ).height
+    print(
+        f"TEMP fix: replaced {old_folder} with {new_folder} in {n_renamed:,} of {ocr.height:,} OCR paths"
+    )
+    ocr = ocr.with_columns(
+        pl.col(path_column).str.replace_all(old_folder, new_folder, literal=True)
+    )
 
     ocr = ocr.with_columns(image_paths(ocr[path_column].to_list(), path_root))
 
@@ -128,7 +134,9 @@ def load_pn_cervix(pn_path, path_column, path_root, cervix_class):
     columns = pn.collect_schema().names()
     for column in [path_column, "max_pred"]:
         if column not in columns:
-            raise ValueError(f"{pn_path} has no column {column}. Its columns are {columns}")
+            raise ValueError(
+                f"{pn_path} has no column {column}. Its columns are {columns}"
+            )
 
     # Rows without a path cannot be matched to an image
     pn = pn.select([path_column, "max_pred"]).drop_nulls(path_column).collect()
@@ -143,7 +151,9 @@ def load_pn_cervix(pn_path, path_column, path_root, cervix_class):
 def print_coverage(images):
     """Images and children per protocol, how many of them PN_CompleteV1 predicts as cervix, and children by how
     many of the 4 protocols they have."""
-    image_rows = images.select(["CPR_CHILD", "image_path", "protocol", "pn_cervix"]).unique()
+    image_rows = images.select(
+        ["CPR_CHILD", "image_path", "protocol", "pn_cervix"]
+    ).unique()
     children = image_rows["CPR_CHILD"].n_unique()
     pn_children = image_rows.filter(pl.col("pn_cervix"))["CPR_CHILD"].n_unique()
 
@@ -259,15 +269,21 @@ class FoldImages:
         # The rows that patient_predictions aggregates, sorted by child and prediction
         if settings["tta"] == "no-tta":
             fold_images = fold_images.filter(pl.col("img_path").str.ends_with("_1"))
-        rows = fold_images.join(image_table, on=["CPR_CHILD", "image_path"]).sort(["child", "preds"])
+        rows = fold_images.join(image_table, on=["CPR_CHILD", "image_path"]).sort(
+            ["child", "preds"]
+        )
         if rows["image"].n_unique() != image_table.height:
-            raise ValueError(f"{settings['model']} has no {settings['tta']} predictions for some of the images")
+            raise ValueError(
+                f"{settings['model']} has no {settings['tta']} predictions for some of the images"
+            )
         self.child = rows["child"].cast(pl.Int64).to_numpy()
         self.image = rows["image"].cast(pl.Int64).to_numpy()
         self.preds = rows["preds"].to_numpy()
 
         n_children = image_table["child"].n_unique()
-        self.all_images = self.first_children(np.ones(image_table.height, dtype=bool), n_children)
+        self.all_images = self.first_children(
+            np.ones(image_table.height, dtype=bool), n_children
+        )
 
     def first_children(self, keep_image, n_children):
         """preds_normalized of children 0 to n_children - 1 from their kept images."""
@@ -314,7 +330,9 @@ def evaluate_n_images(images, max_images, n_draws, rng):
     )
     folds = []
     for model_name in sorted(images["model"].unique()):
-        folds.append(FoldImages(images.filter(pl.col("model") == model_name), image_table))
+        folds.append(
+            FoldImages(images.filter(pl.col("model") == model_name), image_table)
+        )
 
     images_per_child = children["n"].to_numpy()
     labels = children["label"].cast(pl.Boolean).to_numpy()
@@ -341,7 +359,9 @@ def evaluate_n_images(images, max_images, n_draws, rng):
             ensemble = np.mean(fold_predictions, axis=0)
 
             ensemble_aucs[n - 1, draw] = auc(ensemble, labels)
-            fold_aucs[n - 1, draw] = np.mean([auc(predictions, labels) for predictions in fold_predictions])
+            fold_aucs[n - 1, draw] = np.mean(
+                [auc(predictions, labels) for predictions in fold_predictions]
+            )
 
     rows = []
     for n in range(1, max_images + 1):
@@ -405,7 +425,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--pn-predictions",
-    default="/storage/archive/UCPH/DeepFetal/ultrasound/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
+    default="/storage/archive/UCPH/DeepFetal/ultrasound/foundation_model_path_update/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
     help="PN_CompleteV1 classifier outputs CSV with the predicted class (max_pred) of each image",
 )
 parser.add_argument(
@@ -490,7 +510,9 @@ for path in prediction_files:
     )
     # test_ehr_extract.py only tests the folds that had finished training
     fold_names = sorted(images["model"].unique().to_list())
-    print(f"Ensemble of the {len(fold_names)} folds in the test predictions: {', '.join(fold_names)}")
+    print(
+        f"Ensemble of the {len(fold_names)} folds in the test predictions: {', '.join(fold_names)}"
+    )
     print(
         f"{n_matched:,} of {n_images:,} test images are in the us-ocr results (on {args.ocr_path_column} = img_path without the TTA suffix)"
     )
@@ -542,7 +564,9 @@ for path in prediction_files:
         # The images that PN_CompleteV1 predicts as cervix, whatever their protocol
         pn_images = view_images.filter(pl.col("pn_cervix"))
         if pn_images.is_empty():
-            print(f"No images predicted as cervix by PN_CompleteV1 in the view '{view}'")
+            print(
+                f"No images predicted as cervix by PN_CompleteV1 in the view '{view}'"
+            )
         else:
             rows.append(
                 {
@@ -619,7 +643,9 @@ for path in prediction_files:
     for view, view_images in views.items():
         if view_images.is_empty():
             continue
-        for row in evaluate_n_images(view_images, args.max_images, args.n_draws, draw_rng):
+        for row in evaluate_n_images(
+            view_images, args.max_images, args.n_draws, draw_rng
+        ):
             n_image_rows.append({"view": view, **row})
 
     n_images_df = pl.DataFrame(n_image_rows)
