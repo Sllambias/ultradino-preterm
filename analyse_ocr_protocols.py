@@ -502,7 +502,7 @@ parser.add_argument(
     help="Folder joined onto every path in --ocr-path-column before matching, when the OCR paths are relative",
 )
 parser.add_argument(
-    "--pn-predictionAdas",
+    "--pn-prediction",
     default="/storage/archive/UCPH/DeepFetal/ultrasound/foundation_model_path_update/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
     help="PN_CompleteV1 classifier outputs CSV with the predicted class (max_pred) of each image",
 )
@@ -694,9 +694,7 @@ for path in prediction_files:
                         f"\n{group}, {view}: ensemble AUC with at most n random images per child, over "
                         f"{args.n_draws} draws (children_with_n have at least n images)"
                     )
-                    print(
-                        group_n_images_df.filter(pl.col("view") == view).drop("view")
-                    )
+                    print(group_n_images_df.filter(pl.col("view") == view).drop("view"))
 
     pl.DataFrame(combination_rows).write_csv(
         os.path.join(save_path, f"combinations_{cutoff}.csv")
