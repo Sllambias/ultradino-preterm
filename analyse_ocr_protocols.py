@@ -12,15 +12,22 @@ predictions are used, i.e. those that had finished training when test_ehr_extrac
   - "all 4 protocols": only children with images of all 4 protocols, so the combinations differ only in which
     images are used. The Shapley values split this view's AUC above chance (0.5) between the 4 protocols.
 
-For comparison, the ensemble AUC by number of images: each child keeps at most n of its images (with or without a
-protocol), drawn at random --n-draws times, for n = 1, 2, ... in both views. It shows how much of a combination's
-AUC could come from simply having more images.
+Next to the protocols and all images, both views also have the images that the PN_CompleteV1 classifier predicts
+as cervix (max_pred = --pn-cervix-class), whatever their protocol. It is a class of its own: it is not combined
+with the protocols and not part of the Shapley values. Images missing from the PN_CompleteV1 CSV count as not cervix.
 
-The OCR rows are matched to the absolute image paths that the models were tested on (img_path in the image
-predictions, without its TTA suffix).
+With --auc-by-n-images, also the ensemble AUC by number of images: each child keeps at most n of its images (with
+or without a protocol), drawn at random --n-draws times, for n = 1, 2, ... in both views. It shows how much of a
+combination's AUC could come from simply having more images.
 
-Usage: python analyse_ocr_protocols.py <run_dir>/<test name> <us-ocr results.csv> [--ocr-path-column file_path]
-       [--ocr-path-root <folder joined onto the OCR paths>] [--n-draws 20] [--max-images <n>]
+The OCR and PN_CompleteV1 rows are matched to the absolute image paths that the models were tested on (img_path in
+the image predictions, without its TTA suffix).
+
+Usage: python analyse_ocr_protocols.py <run_dir>/<test name> <us-ocr results.csv>
+       [--ocr-path-column file_path] [--ocr-path-root <folder joined onto the OCR paths>]
+       [--pn-predictions <PN_CompleteV1_cls_outputs.csv>] [--pn-path-column file_path]
+       [--pn-path-root <folder joined onto the PN_CompleteV1 paths>]
+       [--auc-by-n-images] [--n-draws 20] [--max-images <n>]
 """
 
 # %%Imports
@@ -53,6 +60,14 @@ def cervix_protocols():
     return ["Cervix", "Cervix dybde 1", "Cervix dybde 2", "Cervix dybde 3"]
 
 
+def image_paths(paths, path_root):
+    """paths as an image_path column, with path_root joined onto them if given (absolute paths are kept as they are)."""
+    if path_root is not None:
+        paths = [os.path.join(path_root, path) for path in paths]
+    # normpath so that e.g. a trailing slash on the root does not stop a match
+    return pl.Series("image_path", [os.path.normpath(path) for path in paths])
+
+
 def load_protocols(ocr_path, path_column, path_root):
     """Cervix protocol of each image in a us-ocr results CSV, keyed by image_path (null if OCR found none).
 
@@ -74,13 +89,7 @@ def load_protocols(ocr_path, path_column, path_root):
     print(f"TEMP fix: replaced {old_folder} with {new_folder} in {n_renamed:,} of {ocr.height:,} OCR paths")
     ocr = ocr.with_columns(pl.col(path_column).str.replace_all(old_folder, new_folder, literal=True))
 
-    paths = ocr[path_column].to_list()
-    if path_root is not None:
-        paths = [os.path.join(path_root, path) for path in paths]
-    # normpath so that e.g. a trailing slash on the root does not stop a match
-    ocr = ocr.with_columns(
-        pl.Series("image_path", [os.path.normpath(path) for path in paths])
-    )
+    ocr = ocr.with_columns(image_paths(ocr[path_column].to_list(), path_root))
 
     ocr = ocr.select(
         [
@@ -109,19 +118,48 @@ def load_protocols(ocr_path, path_column, path_root):
     )
 
 
+def load_pn_cervix(pn_path, path_column, path_root, cervix_class):
+    """Whether PN_CompleteV1 predicts each image in its classifier outputs CSV as cervix, keyed by image_path.
+
+    image_path is the path column with path_root joined onto it if given (absolute paths are kept as they are). An
+    image is cervix if any of its rows has max_pred == cervix_class.
+    """
+    pn = pl.scan_csv(pn_path, schema_overrides={path_column: pl.String})
+    columns = pn.collect_schema().names()
+    for column in [path_column, "max_pred"]:
+        if column not in columns:
+            raise ValueError(f"{pn_path} has no column {column}. Its columns are {columns}")
+
+    # Rows without a path cannot be matched to an image
+    pn = pn.select([path_column, "max_pred"]).drop_nulls(path_column).collect()
+    pn = pn.with_columns(image_paths(pn[path_column].to_list(), path_root))
+
+    # An image can have several rows, e.g. when it was predicted twice
+    return pn.group_by("image_path").agg(
+        (pl.col("max_pred") == cervix_class).any().alias("pn_cervix")
+    )
+
+
 def print_coverage(images):
-    """Images and children per protocol, and children by how many of the 4 protocols they have."""
-    image_rows = images.select(["CPR_CHILD", "image_path", "protocol"]).unique()
+    """Images and children per protocol, how many of them PN_CompleteV1 predicts as cervix, and children by how
+    many of the 4 protocols they have."""
+    image_rows = images.select(["CPR_CHILD", "image_path", "protocol", "pn_cervix"]).unique()
     children = image_rows["CPR_CHILD"].n_unique()
+    pn_children = image_rows.filter(pl.col("pn_cervix"))["CPR_CHILD"].n_unique()
 
     print(
         f"\n{image_rows['image_path'].n_unique():,} images of {children:,} children, "
-        f"{image_rows['protocol'].is_not_null().sum():,} with a cervix protocol"
+        f"{image_rows['protocol'].is_not_null().sum():,} with a cervix protocol and "
+        f"{image_rows['pn_cervix'].sum():,} predicted as cervix by PN_CompleteV1 (of {pn_children:,} children)"
     )
     per_protocol = (
         image_rows.group_by("protocol")
         .agg(
-            [pl.len().alias("images"), pl.col("CPR_CHILD").n_unique().alias("children")]
+            [
+                pl.len().alias("images"),
+                pl.col("CPR_CHILD").n_unique().alias("children"),
+                pl.col("pn_cervix").sum().alias("PN_cervix_images"),
+            ]
         )
         .sort("protocol", nulls_last=True)
     )
@@ -366,6 +404,27 @@ parser.add_argument(
     help="Folder joined onto every path in --ocr-path-column before matching, when the OCR paths are relative",
 )
 parser.add_argument(
+    "--pn-predictions",
+    default="/storage/archive/UCPH/DeepFetal/ultrasound/derived_data/PN_CompleteV1/PN_CompleteV1_cls_outputs.csv",
+    help="PN_CompleteV1 classifier outputs CSV with the predicted class (max_pred) of each image",
+)
+parser.add_argument(
+    "--pn-path-column",
+    default="file_path",
+    help="PN_CompleteV1 column with the image paths. With --pn-path-root joined onto it, it must give the absolute "
+    "img_path of the test predictions",
+)
+parser.add_argument(
+    "--pn-path-root",
+    help="Folder joined onto every path in --pn-path-column before matching, when the PN_CompleteV1 paths are relative",
+)
+parser.add_argument(
+    "--pn-cervix-class",
+    type=int,
+    default=12,
+    help="max_pred of cervix in PN_CompleteV1 (Cervix in its configs/label_mapping/class_label_map.yaml)",
+)
+parser.add_argument(
     "--subgroup", help="Only use children where this column is True, e.g. parity_0"
 )
 parser.add_argument(
@@ -375,21 +434,29 @@ parser.add_argument(
     help="Bootstrap resamples for the ensemble's 95%% CIs",
 )
 parser.add_argument(
+    "--auc-by-n-images",
+    action="store_true",
+    help="Also compute the ensemble AUC when each child keeps at most n random images",
+)
+parser.add_argument(
     "--n-draws",
     type=int,
     default=20,
-    help="Random draws of each child's images for the AUC by number of images",
+    help="Random draws of each child's images for --auc-by-n-images",
 )
 parser.add_argument(
     "--max-images",
     type=int,
-    help="Largest number of images per child for the AUC by number of images. Default: the most any child has",
+    help="Largest number of images per child for --auc-by-n-images. Default: the most any child has",
 )
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()
 
 protocols = cervix_protocols()
 ocr = load_protocols(args.ocr_results, args.ocr_path_column, args.ocr_path_root)
+pn = load_pn_cervix(
+    args.pn_predictions, args.pn_path_column, args.pn_path_root, args.pn_cervix_class
+)
 save_path = os.path.join(args.test_dir, "ocr_protocols")
 os.makedirs(save_path, exist_ok=True)
 
@@ -408,18 +475,16 @@ for path in prediction_files:
         images = images.filter(pl.col(args.subgroup))
 
     # img_path is the absolute path of the loaded image with the TTA flip appended, e.g. <image>.png_1
-    image_paths = images["img_path"].str.replace(r"_\d+$", "").to_list()
-    images = images.with_columns(
-        pl.Series(
-            "image_path", [os.path.normpath(image_path) for image_path in image_paths]
-        )
-    )
+    loaded_paths = images["img_path"].str.replace(r"_\d+$", "").to_list()
+    images = images.with_columns(image_paths(loaded_paths, None))
 
     n_images = images["image_path"].n_unique()
     images = images.join(ocr, on="image_path", how="left")
     n_matched = images.filter(pl.col("image_path").is_in(ocr["image_path"].implode()))[
         "image_path"
     ].n_unique()
+    images = images.join(pn, on="image_path", how="left")
+    n_in_pn = images.filter(pl.col("pn_cervix").is_not_null())["image_path"].n_unique()
     print(
         f"\n========== GA {cutoff}{' (' + args.subgroup + ')' if args.subgroup else ''} =========="
     )
@@ -429,6 +494,16 @@ for path in prediction_files:
     print(
         f"{n_matched:,} of {n_images:,} test images are in the us-ocr results (on {args.ocr_path_column} = img_path without the TTA suffix)"
     )
+    print(
+        f"{n_in_pn:,} of {n_images:,} test images are in the PN_CompleteV1 predictions (on {args.pn_path_column} = img_path without the TTA suffix)"
+    )
+    if n_in_pn == 0:
+        raise ValueError(
+            f"No test image is in {args.pn_predictions}, e.g. test image {images['image_path'][0]} and PN_CompleteV1 "
+            f"image {pn['image_path'][0]}. Check --pn-path-column and --pn-path-root"
+        )
+    # Images that PN_CompleteV1 has no prediction for count as not cervix
+    images = images.with_columns(pl.col("pn_cervix").fill_null(False))
     print_coverage(images)
 
     # Children with images of all 4 protocols, for the view where only the images change
@@ -463,6 +538,20 @@ for path in prediction_files:
                 **evaluate_images(view_images, args.n_bootstrap, rng),
             }
         )
+
+        # The images that PN_CompleteV1 predicts as cervix, whatever their protocol
+        pn_images = view_images.filter(pl.col("pn_cervix"))
+        if pn_images.is_empty():
+            print(f"No images predicted as cervix by PN_CompleteV1 in the view '{view}'")
+        else:
+            rows.append(
+                {
+                    "view": view,
+                    "combination": "PN_CompleteV1 cervix",
+                    "n_protocols": None,
+                    **evaluate_images(pn_images, args.n_bootstrap, rng),
+                }
+            )
 
         for size in range(1, len(protocols) + 1):
             for combination in itertools.combinations(protocols, size):
@@ -522,6 +611,9 @@ for path in prediction_files:
             print(shapley_df)
 
     # %%AUC by the number of images per child, drawn from all of a child's images
+    if not args.auc_by_n_images:
+        continue
+
     draw_rng = np.random.default_rng(args.seed)
     n_image_rows = []
     for view, view_images in views.items():
